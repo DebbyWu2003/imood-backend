@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>imood.ai — 情緒虛擬人對話 Demo</title>
+<style>
+  :root{
+    --bg-deep: #0B1220;
+    --bg-panel: #111B2E;
+    --bg-panel-2: #16223A;
+    --line: #22314D;
+    --text-hi: #EDF1F7;
+    --text-mid: #9AA9C2;
+    --text-dim: #5C6C87;
+    --accent: #E8A33D;
+    --accent-dim: #4A3A1E;
+    --joy: #E8A33D;
+    --anger: #D2564F;
+    --sorrow: #4E7FBF;
+    --calm: #4FA383;
+    --radius: 10px;
+    --mono: "SFMono-Regular", "Consolas", "Menlo", monospace;
+    --sans: -apple-system, "Segoe UI", "Noto Sans TC", "PingFang TC", sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg-deep);
+    color:var(--text-hi);
+    font-family:var(--sans);
+    min-height:100vh;
+  }
+  .app{
+    display:grid;
+    grid-template-columns: 280px 1fr 380px;
+    grid-template-rows: 56px 1fr;
+    grid-template-areas:
+      "header header header"
+      "sidebar main transcript";
+    height:100vh;
+  }
+  header{
+    grid-area:header;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:0 20px;
+    border-bottom:1px solid var(--line);
+    background:var(--bg-panel);
+  }
+  .brand{
+    font-family:var(--mono);
+    font-size:14px;
+    letter-spacing:0.06em;
+    color:var(--text-hi);
+    display:flex;
+    align-items:baseline;
+    gap:10px;
+  }
+  .brand small{color:var(--text-dim); font-weight:400; font-size:12px;}
+  .status-pill{
+    font-family:var(--mono);
+    font-size:11px;
+    color:var(--calm);
+    border:1px solid var(--calm);
+    padding:3px 10px;
+    border-radius:999px;
+    display:flex;
+    align-items:center;
+    gap:6px;
+  }
+  .status-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--calm);}
+
+  .sidebar{
+    grid-area:sidebar;
+    background:var(--bg-panel);
+    border-right:1px solid var(--line);
+    padding:18px 14px;
+    overflow-y:auto;
+  }
+  .sidebar h3{
+    font-size:11px;
+    text-transform:uppercase;
+    letter-spacing:0.08em;
+    color:var(--text-dim);
+    margin:0 0 10px;
+    font-weight:500;
+  }
+  .session-item{
+    padding:10px 12px;
+    border-radius:var(--radius);
+    font-size:13px;
+    color:var(--text-mid);
+    cursor:pointer;
+    margin-bottom:4px;
+  }
+  .session-item.active{
+    background:var(--bg-panel-2);
+    color:var(--text-hi);
+    border-left:2px solid var(--accent);
+  }
+  .sidebar-divider{height:1px; background:var(--line); margin:18px 0;}
+  .input-mode{
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+  }
+  .mode-option{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-size:12px;
+    color:var(--text-mid);
+    padding:8px 10px;
+    border-radius:8px;
+    border:1px solid var(--line);
+  }
+  .mode-option.disabled{opacity:0.4;}
+  .mode-option .tag{
+    font-family:var(--mono);
+    font-size:10px;
+    color:var(--text-dim);
+    margin-left:auto;
+  }
+
+  main{
+    grid-area:main;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    padding:24px;
+    background:
+      radial-gradient(circle at 50% 30%, rgba(232,163,61,0.05), transparent 60%),
+      var(--bg-deep);
+    position:relative;
+  }
+  .avatar-stage{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:18px;
+  }
+  .avatar-frame{
+    width:260px;
+    height:260px;
+    border-radius:50%;
+    background:var(--bg-panel);
+    border:1px solid var(--line);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    position:relative;
+    transition:box-shadow 0.4s ease;
+  }
+  .avatar-frame.speaking{
+    box-shadow: 0 0 0 6px var(--accent-dim);
+  }
+  #face-mouth{ transition: d 0.35s ease; }
+  #face-brow-l, #face-brow-r{ transition: transform 0.35s ease, d 0.35s ease; }
+
+  .emotion-meter{
+    display:flex;
+    gap:10px;
+  }
+  .meter-chip{
+    font-family:var(--mono);
+    font-size:11px;
+    color:var(--text-dim);
+    border:1px solid var(--line);
+    padding:5px 12px;
+    border-radius:999px;
+    transition:all 0.25s ease;
+  }
+  .meter-chip.active{
+    color:var(--bg-deep);
+    border-color:transparent;
+    font-weight:600;
+  }
+  .meter-chip[data-emotion="joy"].active{background:var(--joy);}
+  .meter-chip[data-emotion="anger"].active{background:var(--anger);}
+  .meter-chip[data-emotion="sorrow"].active{background:var(--sorrow);}
+  .meter-chip[data-emotion="calm"].active{background:var(--calm);}
+
+  .transcript{
+    grid-area:transcript;
+    background:var(--bg-panel);
+    border-left:1px solid var(--line);
+    display:flex;
+    flex-direction:column;
+  }
+  .transcript-header{
+    padding:14px 16px;
+    border-bottom:1px solid var(--line);
+    font-size:11px;
+    text-transform:uppercase;
+    letter-spacing:0.08em;
+    color:var(--text-dim);
+  }
+  .transcript-body{
+    flex:1;
+    overflow-y:auto;
+    padding:16px;
+    display:flex;
+    flex-direction:column;
+    gap:12px;
+  }
+  .msg{
+    max-width:100%;
+    font-size:13px;
+    line-height:1.6;
+    padding:10px 12px;
+    border-radius:var(--radius);
+  }
+  .msg.user{
+    background:var(--bg-panel-2);
+    color:var(--text-hi);
+    align-self:flex-end;
+  }
+  .msg.avatar{
+    background:transparent;
+    border:1px solid var(--line);
+    color:var(--text-mid);
+    align-self:flex-start;
+  }
+  .msg .tag{
+    display:block;
+    font-family:var(--mono);
+    font-size:10px;
+    color:var(--text-dim);
+    margin-bottom:4px;
+  }
+  .composer{
+    border-top:1px solid var(--line);
+    background:var(--bg-panel);
+    padding:14px 16px;
+    display:flex;
+    gap:8px;
+  }
+  .composer input{
+    flex:1;
+    background:var(--bg-deep);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:12px 14px;
+    color:var(--text-hi);
+    font-size:14px;
+    font-family:var(--sans);
+    outline:none;
+  }
+  .composer input:focus{border-color:var(--accent);}
+  .composer button{
+    background:var(--accent);
+    color:var(--bg-deep);
+    border:none;
+    border-radius:var(--radius);
+    padding:0 22px;
+    font-size:13px;
+    font-weight:600;
+    cursor:pointer;
+    font-family:var(--sans);
+  }
+  .composer button:disabled{opacity:0.5; cursor:not-allowed;}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">imood.ai <small>情緒虛擬人對話 demo</small></div>
+    <div class="status-pill"><span class="dot"></span>文字輸入模式</div>
+  </header>
+
+  <aside class="sidebar">
+    <h3>對話 Session</h3>
+    <div class="session-item active">目前對話</div>
+    <div class="session-item">＋ 新增 session</div>
+
+    <div class="sidebar-divider"></div>
+
+    <h3>輸入來源</h3>
+    <div class="input-mode">
+      <div class="mode-option">
+        文字輸入 <span class="tag">啟用中</span>
+      </div>
+      <div class="mode-option disabled">
+        語音 / WebRTC <span class="tag">尚未接入</span>
+      </div>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <h3>模型狀態</h3>
+    <div class="input-mode">
+      <div class="mode-option disabled">
+        對話模型 <span class="tag">待選型</span>
+      </div>
+      <div class="mode-option disabled">
+        情緒判別 <span class="tag">BERT 開發中</span>
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="avatar-stage">
+      <div class="avatar-frame" id="avatar-frame">
+        <svg width="160" height="160" viewBox="0 0 160 160">
+          <circle cx="80" cy="80" r="70" fill="none" stroke="#22314D" stroke-width="1"/>
+          <path id="face-brow-l" d="M52 60 Q62 54 72 60" stroke="#9AA9C2" stroke-width="3" fill="none" stroke-linecap="round"/>
+          <path id="face-brow-r" d="M88 60 Q98 54 108 60" stroke="#9AA9C2" stroke-width="3" fill="none" stroke-linecap="round"/>
+          <circle cx="62" cy="76" r="5" fill="#EDF1F7"/>
+          <circle cx="98" cy="76" r="5" fill="#EDF1F7"/>
+          <path id="face-mouth" d="M58 106 Q80 118 102 106" stroke="#EDF1F7" stroke-width="4" fill="none" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="emotion-meter" id="emotion-meter">
+        <div class="meter-chip active" data-emotion="calm">樂 / 平靜</div>
+        <div class="meter-chip" data-emotion="joy">喜</div>
+        <div class="meter-chip" data-emotion="anger">怒</div>
+        <div class="meter-chip" data-emotion="sorrow">哀</div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="transcript">
+    <div class="transcript-header">對話紀錄</div>
+    <div class="transcript-body" id="transcript-body">
+      <div class="msg avatar"><span class="tag">avatar</span>嗨，我在這裡，輸入文字跟我聊聊吧。</div>
+    </div>
+    <div class="composer">
+      <input type="text" id="text-input" placeholder="輸入訊息，按 Enter 送出…" autocomplete="off">
+      <button id="send-btn">送出</button>
+    </div>
+  </aside>
+</div>
+
+<script>
+// ============================================================
+// 這個檔案是「網頁 portal」的骨架，純 HTML/CSS/JS，沒有用任何框架。
+//
+// 1. callDialogueModel(text)  → 已接上後端 /api/chat（見 server.py，
+//    用 llama.cpp 跑 Qwen2.5-1.5B-Instruct）
+// 2. detectEmotion(text)      → 目前仍是關鍵字假規則，
+//    TODO：換成真正呼叫 BERT 情緒分類器的結果
+//
+// 之後如果要接 WebRTC + JoyGen，則是在 avatar-frame 這個位置，
+// 用 <video> 取代目前的 SVG 臉，並在 pc.ontrack 拿到 stream 後
+// videoEl.srcObject = event.streams[0]
+// ============================================================
+
+const transcriptBody = document.getElementById('transcript-body');
+const textInput = document.getElementById('text-input');
+const sendBtn = document.getElementById('send-btn');
+const avatarFrame = document.getElementById('avatar-frame');
+const mouth = document.getElementById('face-mouth');
+const browL = document.getElementById('face-brow-l');
+const browR = document.getElementById('face-brow-r');
+const meterChips = document.querySelectorAll('.meter-chip');
+
+// --- 表情設定：之後要接 JoyGen 的表情素材，可以把這幾組路徑
+//     換成「選對應情緒影片」的邏輯，而不是畫 SVG ---
+const FACES = {
+  calm:   { mouth: 'M58 106 Q80 118 102 106', browL: 'M52 60 Q62 54 72 60', browR: 'M88 60 Q98 54 108 60' },
+  joy:    { mouth: 'M56 102 Q80 128 104 102', browL: 'M52 58 Q62 50 74 58', browR: 'M86 58 Q98 50 108 58' },
+  anger:  { mouth: 'M58 110 Q80 100 102 110', browL: 'M52 64 Q64 60 76 66', browR: 'M84 66 Q96 60 108 64' },
+  sorrow: { mouth: 'M58 112 Q80 104 102 112', browL: 'M52 66 Q64 56 76 62', browR: 'M84 62 Q96 56 108 66' },
+};
+
+function setEmotion(emotion) {
+  const f = FACES[emotion] || FACES.calm;
+  mouth.setAttribute('d', f.mouth);
+  browL.setAttribute('d', f.browL);
+  browR.setAttribute('d', f.browR);
+  meterChips.forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.emotion === emotion);
+  });
+}
+
+// --- 極簡關鍵字判別，純粹是 demo 用的假規則 ---
+// TODO: 換成呼叫君榮那邊的 BERT 情緒分類器（4 類：喜/怒/哀/樂）
+function detectEmotion(text) {
+  const joyWords = ['開心', '太好了', '哈哈', '謝謝', '讚', '喜歡'];
+  const angerWords = ['生氣', '討厭', '爛', '氣死', '煩'];
+  const sorrowWords = ['難過', '傷心', '哭', '失望', '孤單'];
+  if (joyWords.some(w => text.includes(w))) return 'joy';
+  if (angerWords.some(w => text.includes(w))) return 'anger';
+  if (sorrowWords.some(w => text.includes(w))) return 'sorrow';
+  return 'calm';
+}
+
+// --- 真正的對話模型：呼叫後端 /api/chat ---
+// 後端見 server.py，用 llama.cpp 跑 Qwen2.5-1.5B-Instruct
+// 若後端還沒啟動或連線失敗，會回傳一個提示訊息，不會讓 UI 卡住
+const CHAT_API_URL = 'http://localhost:8000/api/chat';
+
+async function callDialogueModel(text) {
+  try {
+    const res = await fetch(CHAT_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+    if (!res.ok) {
+      throw new Error(`後端回應錯誤：${res.status}`);
+    }
+    const data = await res.json();
+    return data.reply;
+  } catch (err) {
+    console.error('callDialogueModel 失敗：', err);
+    return '（無法連線到對話模型後端，請確認 server.py 是否已啟動）';
+  }
+}
+
+function appendMessage(role, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.innerHTML = `<span class="tag">${role === 'user' ? '你' : 'avatar'}</span>${text}`;
+  transcriptBody.appendChild(div);
+  transcriptBody.scrollTop = transcriptBody.scrollHeight;
+}
+
+async function handleSend() {
+  const text = textInput.value.trim();
+  if (!text) return;
+  textInput.value = '';
+  sendBtn.disabled = true;
+
+  appendMessage('user', text);
+  setEmotion(detectEmotion(text));
+
+  avatarFrame.classList.add('speaking');
+  const reply = await callDialogueModel(text);
+  avatarFrame.classList.remove('speaking');
+
+  appendMessage('avatar', reply);
+  sendBtn.disabled = false;
+  textInput.focus();
+}
+
+sendBtn.addEventListener('click', handleSend);
+textInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') handleSend();
+});
+</script>
+</body>
+</html>
