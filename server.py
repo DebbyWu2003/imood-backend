@@ -19,8 +19,10 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from llama_cpp import Llama
+import json
 import time
 
 MODEL_PATH = "./models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
@@ -88,6 +90,47 @@ def chat(req: ChatRequest):
     latency_ms = int((time.time() - start) * 1000)
 
     return ChatResponse(reply=reply, latency_ms=latency_ms)
+
+
+@app.post("/api/chat/stream")
+def chat_stream(req: ChatRequest):
+    """
+    SSE streaming 版本的 /api/chat。前端不能用 EventSource（那個只能發 GET），
+    改用 fetch + ReadableStream 自己解析 "data: {...}\n\n" 這種格式。
+
+    之後接 JoyGen text2voice 時，可以比照這支的做法：把這裡的
+    `yield` 换成「把每個 delta 轉送給 JoyGen 的 streaming TTS endpoint」，
+    介面（逐字 SSE chunk）不用變。
+    """
+    if llm is None:
+        raise HTTPException(status_code=503, detail="模型尚未載入完成")
+
+    text = req.message.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="訊息不可為空")
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": text},
+    ]
+
+    def event_generator():
+        start = time.time()
+        stream = llm.create_chat_completion(
+            messages=messages,
+            max_tokens=200,
+            temperature=0.7,
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk["choices"][0].get("delta", {})
+            piece = delta.get("content")
+            if piece:
+                yield f"data: {json.dumps({'delta': piece}, ensure_ascii=False)}\n\n"
+        latency_ms = int((time.time() - start) * 1000)
+        yield f"data: {json.dumps({'done': True, 'latency_ms': latency_ms}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/health")

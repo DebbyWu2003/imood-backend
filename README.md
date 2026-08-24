@@ -20,8 +20,22 @@ uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 啟動後，直接用瀏覽器打開 `demo-imood-dashboard.html` 即可（它會呼叫
-`http://localhost:8000/api/chat`）。若你的後端跑在別台機器或別的
-port，記得把 HTML 裡的 `CHAT_API_URL` 改掉。
+`http://localhost:8000/api/chat/stream` 做逐字 streaming 顯示，連不上時
+自動退回 `http://localhost:8000/api/chat` 非 streaming 版本）。若你的
+後端跑在別台機器或別的 port，記得把 HTML 裡的 `CHAT_STREAM_URL` /
+`CHAT_API_URL` 改掉。
+
+## 麥克風骨架
+Sidebar 有個「🎤 啟用麥克風」按鈕，目前只會呼叫 `getUserMedia()` 並畫
+音量條，**不會**送出任何 WebRTC track，純粹先驗證瀏覽器權限流程。等跟
+JoyGen 那邊對齊輸入格式（voice-only / text2voice、sample rate 等）後，
+再把 `enableMic()` 裡拿到的 `micStream` 接進 `RTCPeerConnection.addTrack()`。
+
+## JoyGen video track 對接點
+`avatar-frame` 裡已經放了一個預設 `display:none` 的 `<video id="avatar-video">`，
+等 WebRTC 談好、`pc.ontrack` 拿到 remote stream 後呼叫
+`attachRemoteStream(stream)`（定義在 HTML 的 `<script>` 裡）即可自動切換
+成播放 JoyGen 的畫面，蓋掉目前的 SVG 假臉。
 
 ## 之後要接情緒分類（BERT）時
 `detectEmotion(text)` 目前還是關鍵字假規則，等君榮那邊的 BERT 模型好了，

@@ -123,6 +123,35 @@
     color:var(--text-dim);
     margin-left:auto;
   }
+  .mode-option .tag.on{ color:var(--calm); }
+  .mic-btn{
+    width:100%;
+    margin-top:8px;
+    background:var(--bg-panel-2);
+    color:var(--text-hi);
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:9px 10px;
+    font-size:12px;
+    font-family:var(--sans);
+    cursor:pointer;
+  }
+  .mic-btn:hover{ border-color:var(--accent); }
+  .mic-btn.recording{ border-color:var(--anger); color:var(--anger); }
+  .mic-meter{
+    margin-top:8px;
+    height:6px;
+    border-radius:999px;
+    background:var(--bg-deep);
+    border:1px solid var(--line);
+    overflow:hidden;
+  }
+  .mic-meter-bar{
+    height:100%;
+    width:0%;
+    background:var(--calm);
+    transition:width 0.08s linear;
+  }
 
   main{
     grid-area:main;
@@ -159,6 +188,15 @@
   }
   #face-mouth{ transition: d 0.35s ease; }
   #face-brow-l, #face-brow-r{ transition: transform 0.35s ease, d 0.35s ease; }
+  #avatar-video{
+    width:100%;
+    height:100%;
+    border-radius:50%;
+    object-fit:cover;
+    display:none;
+  }
+  .avatar-frame.video-active #avatar-video{ display:block; }
+  .avatar-frame.video-active #avatar-svg{ display:none; }
 
   .emotion-meter{
     display:flex;
@@ -283,10 +321,12 @@
       <div class="mode-option">
         文字輸入 <span class="tag">啟用中</span>
       </div>
-      <div class="mode-option disabled">
-        語音 / WebRTC <span class="tag">尚未接入</span>
+      <div class="mode-option" id="mic-option">
+        語音 / WebRTC <span class="tag" id="mic-tag">尚未啟用</span>
       </div>
     </div>
+    <button id="mic-btn" class="mic-btn">🎤 啟用麥克風（僅測試權限）</button>
+    <div class="mic-meter" id="mic-meter"><div class="mic-meter-bar" id="mic-meter-bar"></div></div>
 
     <div class="sidebar-divider"></div>
 
@@ -304,7 +344,12 @@
   <main>
     <div class="avatar-stage">
       <div class="avatar-frame" id="avatar-frame">
-        <svg width="160" height="160" viewBox="0 0 160 160">
+        <!--
+          JoyGen 接上後：pc.ontrack = (e) => { avatarVideo.srcObject = e.streams[0]; showVideo(); }
+          在拿到真的 remote stream 之前，video 保持 hidden，畫面用下面的 SVG 假臉代替。
+        -->
+        <video id="avatar-video" autoplay playsinline muted></video>
+        <svg id="avatar-svg" width="160" height="160" viewBox="0 0 160 160">
           <circle cx="80" cy="80" r="70" fill="none" stroke="#22314D" stroke-width="1"/>
           <path id="face-brow-l" d="M52 60 Q62 54 72 60" stroke="#9AA9C2" stroke-width="3" fill="none" stroke-linecap="round"/>
           <path id="face-brow-r" d="M88 60 Q98 54 108 60" stroke="#9AA9C2" stroke-width="3" fill="none" stroke-linecap="round"/>
@@ -352,10 +397,31 @@ const transcriptBody = document.getElementById('transcript-body');
 const textInput = document.getElementById('text-input');
 const sendBtn = document.getElementById('send-btn');
 const avatarFrame = document.getElementById('avatar-frame');
+const avatarVideo = document.getElementById('avatar-video');
 const mouth = document.getElementById('face-mouth');
 const browL = document.getElementById('face-brow-l');
 const browR = document.getElementById('face-brow-r');
 const meterChips = document.querySelectorAll('.meter-chip');
+const micBtn = document.getElementById('mic-btn');
+const micTag = document.getElementById('mic-tag');
+const micMeterBar = document.getElementById('mic-meter-bar');
+
+// ============================================================
+// JoyGen WebRTC 對接點（目前是空殼，等品靜那邊確認 track 可用後再實作）
+//
+// 用法：等 RTCPeerConnection 建立好、pc.ontrack 觸發時呼叫
+//   attachRemoteStream(event.streams[0])
+// 就會自動把 <video> 打開、蓋掉 SVG 假臉。
+// ============================================================
+function attachRemoteStream(stream) {
+  avatarVideo.srcObject = stream;
+  avatarFrame.classList.add('video-active');
+}
+
+function detachRemoteStream() {
+  avatarVideo.srcObject = null;
+  avatarFrame.classList.remove('video-active');
+}
 
 // --- 表情設定：之後要接 JoyGen 的表情素材，可以把這幾組路徑
 //     換成「選對應情緒影片」的邏輯，而不是畫 SVG ---
@@ -388,35 +454,69 @@ function detectEmotion(text) {
   return 'calm';
 }
 
-// --- 真正的對話模型：呼叫後端 /api/chat ---
-// 後端見 server.py，用 llama.cpp 跑 Qwen2.5-1.5B-Instruct
-// 若後端還沒啟動或連線失敗，會回傳一個提示訊息，不會讓 UI 卡住
+// --- 真正的對話模型：呼叫後端 /api/chat/stream（SSE） ---
+// 後端見 server.py，用 llama.cpp 跑 Qwen2.5-1.5B-Instruct，逐字 stream 回傳。
+// EventSource 不能發 POST，所以自己用 fetch + ReadableStream 解析
+// "data: {...}\n\n" 格式。若連線失敗，改呼叫非 streaming 版 /api/chat 當備援。
+const CHAT_STREAM_URL = 'http://localhost:8000/api/chat/stream';
 const CHAT_API_URL = 'http://localhost:8000/api/chat';
 
-async function callDialogueModel(text) {
-  try {
-    const res = await fetch(CHAT_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
-    });
-    if (!res.ok) {
-      throw new Error(`後端回應錯誤：${res.status}`);
-    }
-    const data = await res.json();
-    return data.reply;
-  } catch (err) {
-    console.error('callDialogueModel 失敗：', err);
-    return '（無法連線到對話模型後端，請確認 server.py 是否已啟動）';
+async function callDialogueModelStream(text, onDelta) {
+  const res = await fetch(CHAT_STREAM_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: text }),
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(`後端回應錯誤：${res.status}`);
   }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let full = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE 事件用 "\n\n" 分隔
+    const events = buffer.split('\n\n');
+    buffer = events.pop(); // 最後一段可能不完整，留到下一輪
+    for (const evt of events) {
+      const line = evt.trim();
+      if (!line.startsWith('data:')) continue;
+      const payload = JSON.parse(line.slice(5).trim());
+      if (payload.delta) {
+        full += payload.delta;
+        onDelta(payload.delta, full);
+      }
+    }
+  }
+  return full;
+}
+
+// 非 streaming 備援（stream 端點連不上時使用）
+async function callDialogueModelFallback(text) {
+  const res = await fetch(CHAT_API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: text }),
+  });
+  if (!res.ok) throw new Error(`後端回應錯誤：${res.status}`);
+  const data = await res.json();
+  return data.reply;
 }
 
 function appendMessage(role, text) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
-  div.innerHTML = `<span class="tag">${role === 'user' ? '你' : 'avatar'}</span>${text}`;
+  div.innerHTML = `<span class="tag">${role === 'user' ? '你' : 'avatar'}</span><span class="body"></span>`;
+  div.querySelector('.body').textContent = text;
   transcriptBody.appendChild(div);
   transcriptBody.scrollTop = transcriptBody.scrollHeight;
+  return div;
 }
 
 async function handleSend() {
@@ -429,10 +529,25 @@ async function handleSend() {
   setEmotion(detectEmotion(text));
 
   avatarFrame.classList.add('speaking');
-  const reply = await callDialogueModel(text);
-  avatarFrame.classList.remove('speaking');
+  const avatarDiv = appendMessage('avatar', '');
+  const bodyEl = avatarDiv.querySelector('.body');
 
-  appendMessage('avatar', reply);
+  try {
+    await callDialogueModelStream(text, (_delta, full) => {
+      bodyEl.textContent = full;
+      transcriptBody.scrollTop = transcriptBody.scrollHeight;
+    });
+  } catch (err) {
+    console.error('streaming 失敗，改用非 streaming 備援：', err);
+    try {
+      bodyEl.textContent = await callDialogueModelFallback(text);
+    } catch (err2) {
+      console.error('callDialogueModelFallback 也失敗：', err2);
+      bodyEl.textContent = '（無法連線到對話模型後端，請確認 server.py 是否已啟動）';
+    }
+  }
+
+  avatarFrame.classList.remove('speaking');
   sendBtn.disabled = false;
   textInput.focus();
 }
@@ -440,6 +555,72 @@ async function handleSend() {
 sendBtn.addEventListener('click', handleSend);
 textInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') handleSend();
+});
+
+// ============================================================
+// 麥克風權限骨架（僅測試 getUserMedia + 顯示音量，不送任何 WebRTC track）
+//
+// 目的：先確認瀏覽器權限流程、音量偵測邏輯沒問題。等跟品靜對齊完
+// JoyGen 是 voice-only 還是 text2voice 之後，這裡的 micStream
+// 就是之後 pc.addTrack(micStream.getAudioTracks()[0]) 的來源。
+// ============================================================
+let micStream = null;
+let micAudioCtx = null;
+let micAnalyser = null;
+let micRafId = null;
+
+async function enableMic() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    console.error('取得麥克風權限失敗：', err);
+    micTag.textContent = '權限被拒絕';
+    return;
+  }
+
+  micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = micAudioCtx.createMediaStreamSource(micStream);
+  micAnalyser = micAudioCtx.createAnalyser();
+  micAnalyser.fftSize = 256;
+  source.connect(micAnalyser);
+
+  micBtn.textContent = '⏹ 停止麥克風';
+  micBtn.classList.add('recording');
+  micTag.textContent = '已啟用（僅測試）';
+  micTag.classList.add('on');
+
+  drawMicLevel();
+}
+
+function drawMicLevel() {
+  const data = new Uint8Array(micAnalyser.frequencyBinCount);
+  micAnalyser.getByteFrequencyData(data);
+  const avg = data.reduce((a, b) => a + b, 0) / data.length;
+  micMeterBar.style.width = Math.min(100, (avg / 128) * 100) + '%';
+  micRafId = requestAnimationFrame(drawMicLevel);
+}
+
+function disableMic() {
+  if (micRafId) cancelAnimationFrame(micRafId);
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  if (micAudioCtx) micAudioCtx.close();
+  micStream = null;
+  micAudioCtx = null;
+  micAnalyser = null;
+  micMeterBar.style.width = '0%';
+
+  micBtn.textContent = '🎤 啟用麥克風（僅測試權限）';
+  micBtn.classList.remove('recording');
+  micTag.textContent = '尚未啟用';
+  micTag.classList.remove('on');
+}
+
+micBtn.addEventListener('click', () => {
+  if (micStream) {
+    disableMic();
+  } else {
+    enableMic();
+  }
 });
 </script>
 </body>
