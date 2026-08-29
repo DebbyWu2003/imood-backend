@@ -4,3 +4,7 @@ models/.cache/
 __pycache__/
 *.pyc
 .DS_Store
+
+# ASR 測試語音（可用 scripts/gen_tts_samples.py 或 scripts/record_wav.py 重生）
+samples/
+*.wav

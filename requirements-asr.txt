@@ -1,0 +1,15 @@
+# ASR 選型驗證階段的額外依賴（docs/asr-todo.md 第 4.1 節）
+# 還沒併進正式 requirements.txt / server.py。等 4.3 真的把 faster-whisper 接進
+# server.py 時，只把 faster-whisper（釘版本）加進 requirements.txt，其餘留在這。
+#
+#   python -m venv venv
+#   venv\Scripts\python -m pip install -r requirements-asr.txt
+
+# --- ASR 本體 ---
+faster-whisper
+
+# --- 測試 / 評估用（非 server 執行期需要）---
+sounddevice        # scripts/record_wav.py 錄麥克風
+soundfile          # scripts/record_wav.py 寫 wav
+edge-tts           # scripts/gen_tts_samples.py 產生合成測試語音
+opencc             # scripts/asr_eval.py 繁簡統一後再算 CER
