@@ -1,6 +1,6 @@
 # 4.2 VAD 斷句 + 音訊 buffer — 實作計畫
 
-負責人：映潔　日期：2026-08-29
+負責人：映潔　日期：2026-08-29（更新：已跟品靜確認 JoyGen 音訊來源）
 對應：`docs/asr-todo.md` 第 4.2 節、第 6 節風險 1（buffer 分工）與 2（靜音閾值）
 前置：`docs/asr-41-results.md`（選型已定 = faster-whisper `small`，CPU/int8）
 
@@ -11,14 +11,18 @@
 
 ## 1. 決議摘要
 
-- **音訊 buffer：共用一份**（2026-08-29 團隊 + 映潔判斷）。`/ws/audio` 收到的
-  PCM 進同一個 accumulator，ASR 與（未來的）JoyGen 轉送都從它取，但消費模式
-  不同 —— JoyGen 那條做成 tee，不等 VAD。細節見第 3 節。
+- **JoyGen 音訊來源已確認（品靜，2026-08-29）**：JoyGen audio2motion 吃的是
+  **LLM 回覆經 TTS 合成的音訊**，用來讓 avatar「講出回覆」——**不是**使用者
+  輸入的麥克風 PCM。架構文件第 2 節那張「使用者 PCM → JoyGen」的圖是舊的、
+  會誤導。
+- **所以沒有共用 buffer 的問題**：`/ws/audio` 收到的麥克風 PCM 只給 ASR 用，
+  一個單純的 accumulator 就好。JoyGen 那條由未來的 TTS / 回覆端另外餵，跟這條
+  輸入路徑無關（TTS 目前暫緩，見 `docs/asr-todo.md` 第 5 節）。
+- **`server.py` 的 `# TODO forward to JoyGen`**：這個掛勾點放錯位置了（轉送
+  使用者麥克風 PCM 給 JoyGen 不是設計），4.2 實作時移除；JoyGen 對接改到
+  之後 TTS 那條路上做。
 - **VAD 靜音閾值：起始 700ms**，往長的那端偏（陪伴型 app，切斷正在傾訴的人
   比晚 1 秒回應更糟）。完整參數見第 2 節。
-- **待跟品靜確認**：架構文件第 2 節的圖是「使用者 PCM → JoyGen audio2motion」，
-  代表 JoyGen 吃的是**使用者輸入音訊**。若 JoyGen 其實是要讓 avatar 講 **LLM
-  回覆**（該吃 TTS 音訊），就沒有共用 buffer 的問題。動工前問一句。
 
 ---
 
@@ -72,49 +76,39 @@
 
 ---
 
-## 3. 共用 buffer 的設計
+## 3. 音訊 buffer 設計（ASR 專用）
 
-### 3.1 為什麼要注意
+JoyGen 不吃這條 PCM（見第 1 節），所以不用 tee、不用擔心兩種消費節奏衝突。
+就是一個單純的「累積到句尾靜音再整段辨識」的 accumulator。
 
-ASR 與 JoyGen 對同一份 PCM 的消費模式相反：
-
-| 消費者 | 需要的節奏 |
-|---|---|
-| JoyGen audio2motion | 每個 320ms chunk **立刻轉送**，低延遲連續流，對齊 25fps |
-| ASR（輪流式） | **累積**到句尾靜音，再整段送去辨識 |
-
-如果只做「累積、等 VAD 再處理」，JoyGen 會被 VAD 的斷句延遲卡住 → 嘴型延遲
-好幾百 ms。反過來如果只做「立刻轉送、不留」，ASR 沒東西可辨識。
-
-### 3.2 做法：一份 accumulator + tee
+### 3.1 流程
 
 ```
         receive_bytes() 收到一個 320ms chunk
                      │
-        ┌────────────┴────────────┐
-        ▼                         ▼
- (a) append 進 ASR 語句 buffer   (b) 立刻轉送 JoyGen
-     ＋跑 VAD 更新靜音計數           （目前是 no-op stub，
-        │                            對應 server.py 的
-        ▼                            # TODO forward to JoyGen）
-  靜音 ≥ 700ms 或 buffer ≥ 15s？
-        │ 是
-        ▼
-  切走累積的 buffer → faster-whisper 辨識 → 清空
-  （不影響 (b) 的轉送）
+                     ▼
+   append 進語句 buffer ＋ 跑 VAD 更新靜音計數
+                     │
+                     ▼
+   靜音 ≥ 700ms 或 buffer ≥ 15s？
+                     │ 是
+                     ▼
+   有聲音訊 ≥ 400ms？──否──▶ 丟棄 buffer，重新開始
+                     │ 是
+                     ▼
+   切走累積的 buffer → faster-whisper 辨識 → 清空 → 準備收下一句
 ```
 
 要點：
 
-- **JoyGen 那條（b）永遠不等 VAD 判定**。VAD 只決定 (a) 何時把累積的語句丟去
-  ASR，跟 (b) 無關。
-- 4.2 這階段 JoyGen 沒有 endpoint 可對，(b) 先是空的（維持現有 `{ack}` 回應）。
-  「共用 buffer」在這階段的實際意義只是：**之後接 JoyGen 時不要再另外開第二個
-  buffer**，直接在這個 tee 點加轉送邏輯。
-- buffer 用 `bytearray` 或固定上限的 ring buffer；清空 = 重置長度，別每次
-  重新配置。
+- buffer 用 `bytearray`；清空 = `del buf[:]` 或重置長度，別每次重新配置物件。
+- VAD 狀態（靜音計數、是否已進入語音、有聲音訊累計長度）跟著 buffer 一起，
+  每個 WebSocket 連線一份，斷線就丟。
+- 辨識用 `run_in_executor` 丟到 thread pool，別 block event loop（faster-whisper
+  是同步 API，`small` 一句約 1–3s）。辨識期間仍持續收 chunk 進 buffer（其實
+  這時使用者通常在等，不會講話，但要能收）。
 
-### 3.3 邊界情況
+### 3.2 邊界情況
 
 - **語句被 15s 強制 flush 後使用者還在講**：下一段從 flush 點接續累積，前置
   padding 這次略過（沒有靜音起點）。ASR 結果可能在切點附近斷字，可接受。
