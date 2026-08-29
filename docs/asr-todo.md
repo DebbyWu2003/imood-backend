@@ -17,7 +17,13 @@
    這份文件來的。
 3. `README.md` 的「麥克風／voice-only 語音輸入」章節——目前已完成的部分。
 
-## 1. 現況（已完成，不用重做）
+## 1. 現況
+
+> **2026-08-29 更新**：這份待辦的 4.1–4.4 已完成、4.5 首輪已跑，voice-only
+> 的「講完話 → 有回應」整條端到端在本機跑通了。下面第 4 節每個小節有勾選
+> 狀態與實作對照；細節見 `docs/asr-41-results.md`（選型）與
+> `docs/asr-42-vad-plan.md`（VAD / 續句合併 / 延遲量測）。**只剩 4.5 的真人
+> 對話語音測試**。以下保留原始交接內容當歷程。
 
 - **2026-08-29 團隊決議**：先做 **voice-only**（text2voice / streaming TTS
   選型暫緩）；JoyGen 輸出端維持 **UDP/MPEG-TS**。
@@ -25,14 +31,12 @@
   即時把麥克風 downsample 成 **16kHz / mono / 16-bit PCM**，每 **320ms**
   （對齊 JoyGen diffusion decoder 的 8-frame batch @25fps）送一個 chunk，
   透過 WebSocket 送到後端 `/ws/audio`。
-- 後端 `server.py`：`/ws/audio` 會驗證 chunk 格式、回
-  `{ack, chunk_ms, total_bytes}`，但**目前只是回 ack，不會做任何辨識或
-  轉送**，程式碼裡有 `# TODO forward to JoyGen` 的掛勾點。
+- 後端 `server.py`：`/ws/audio` ~~只回 ack~~ **（已完成）** 現在會累積 chunk
+  → VAD 斷句 → faster-whisper 辨識 → 續句合併 → Qwen 回覆 streaming，透過
+  WebSocket 訊息送回前端。原本的 `# TODO forward to JoyGen` 掛勾點已移除
+  （品靜 8/29 確認 JoyGen 吃的是 LLM 回覆的 TTS 音訊，不是使用者輸入 PCM）。
 - 回歸測試腳本：`scripts/test_ws_audio.py`（驗證 `/ws/audio` 的格式檢查
   邏輯沒壞掉，不需要真麥克風）。
-
-**現在的行為**：對著麥克風講話，後端只會印 ack，**不會有任何回應**——這是
-目前的已知缺口，也是這份待辦要補的部分。
 
 ## 2. 目標
 
@@ -54,44 +58,44 @@
 [複用] 前端 appendMessage() / setEmotion()，跟現在打字模式共用同一套顯示邏輯
 ```
 
-## 3. 環境搬遷 checklist（換機器第一步）
+## 3. 環境搬遷 checklist（換機器第一步）— 已完成（桌機是 Windows，指令有出入）
 
-- [ ] clone / 複製整個 repo（含 `models/` 目錄，`qwen2.5-1.5b-instruct-q4_k_m.gguf`
-      約 1GB，注意不要漏掉）。
-- [ ] 桌機建立新的 venv：`python3 -m venv venv && source venv/bin/activate`
-- [ ] `pip install -r requirements.txt --break-system-packages`（跟現在一樣）
-- [ ] `uvicorn server:app --host 0.0.0.0 --port 8000` 跑起來，確認
-      `curl localhost:8000/health` 回 `{"status":"ok","model_loaded":true}`
-- [ ] 瀏覽器開 `demo-imood-dashboard.html`，確認文字輸入模式、麥克風
-      voice-only pipeline（連線 `/ws/audio`、看得到 ack）都跟筆電上一樣正常，
-      再開始加 ASR，避免把環境問題跟新功能的 bug 混在一起 debug。
-- [ ] 跑 `python3 scripts/test_ws_audio.py` 確認基礎回歸測試先過。
-- [ ] 確認桌機 CPU 核心數／記憶體（`sysctl -n hw.ncpu` / `hw.memsize`，或
-      Linux 用 `nproc` / `free -h`），ASR 模型大小選型會依這個調整。
+- [x] repo + `models/qwen2.5-1.5b-instruct-q4_k_m.gguf`（1.1GB，用
+      `huggingface_hub.hf_hub_download('Qwen/Qwen2.5-1.5B-Instruct-GGUF', ...)` 抓）。
+- [x] venv：`python -m venv venv`（Windows，`venv\Scripts\python`；不用 activate）。
+- [x] `venv\Scripts\python -m pip install -r requirements.txt`
+      （`llama-cpp-python` 用 `--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu`
+      的預編 wheel，Windows source build 會因路徑過長失敗）。
+      評估/測試用的額外依賴：`pip install -r requirements-asr.txt`。
+- [x] `uvicorn server:app --port 8000` 起得來，`/health` 回
+      `{"status":"ok","model_loaded":true}`。
+- [x] 瀏覽器開 `demo-imood-dashboard.html`，文字模式 + voice-only pipeline 正常。
+- [x] `scripts/test_ws_audio.py` 過。
+- [x] 桌機規格：12 cores / 64 GB / ffmpeg 7.1.1 在 PATH（見 asr-41-results.md）。
 
 ## 4. ASR 實作步驟（依順序做）
 
-### 4.1 選型與環境驗證（約 0.5 天）
-- [ ] 安裝 **faster-whisper**（CTranslate2 後端，CPU int8 量化跑起來快，
-      跟現有 llama.cpp 本地優先的路線一致）：
-      `pip install faster-whisper`
-- [ ] 下載 `small` 模型（中文優先驗證），寫一支獨立小腳本（不用進
-      `server.py`），錄一段自己講話的 wav（16kHz/mono），跑一次辨識，
-      確認：
-      - 中文辨識品質可接受
-      - 單次辨識延遲（幾秒的語音大概要算多久）
-- [ ] 如果 `small` 品質不夠，再試 `base` 或 `medium`，記錄各自的延遲/
-      品質權衡，決定要用哪個。
+### 4.1 選型與環境驗證（約 0.5 天）— 已完成 2026-08-29，見 docs/asr-41-results.md
+- [x] 裝 **faster-whisper** 1.2.1（ctranslate2 4.8.1，CPU int8）。
+- [x] `scripts/asr_demo.py`（單檔）+ `scripts/asr_eval.py`（批次算 CER）。
+      遠端連線無法錄音，改用 `scripts/gen_tts_samples.py`（edge-tts 合成）+
+      `scripts/fetch_fleurs_zh.py`（FLEURS 真人朗讀）當測試語料。
+- [x] small/base/medium 都跑過：**選 `small`**。口語 CER 1.6%、FLEURS 真人
+      朗讀 CER 6.2%；一句辨識 RTF ~0.2–0.5x。`base` 明顯差；`medium` 難詞域
+      較好但慢 ~2.5x，留作 fallback。
+- [ ] 待補：真人**對話**語音（非朗讀）再驗一次品質。
 
 ### 4.2 VAD 斷句邏輯（約 0.5–1 天）— 已完成 2026-08-29，見 docs/asr-42-vad-plan.md
-- [x] 在 `/ws/audio` 裡把收到的 PCM chunk 累積進一個 buffer。
+- [x] `/ws/audio` 裡把 PCM chunk 累積進 buffer（`voice_asr.Endpointer`，
+      buffer 純 ASR 用，不跟 JoyGen 共用）。
 - [x] 靜音偵測：`webrtcvad`（aggressiveness 2）+ 自適應能量門檻，連續靜音
-      700ms（起始值，待真人語音現場調）判定「這句話講完了」。
-- [x] 觸發後把累積 buffer 丟去 faster-whisper 辨識（`voice_asr.Transcriber`）。
-- [x] 清空 buffer、準備收下一句；太短的語句丟棄。
+      **900ms**（起始 700，量測後調到 900，見 asr-42-vad-plan 第 7 節）判定句尾。
+- [x] 觸發後把累積 buffer 丟 faster-whisper（`voice_asr.Transcriber`）；
+      清空 buffer；太短的語句丟棄（回 `asr_empty`）。
+- [x] 續句合併：句尾判定後不馬上丟 LLM，先等 1s 靜音看有沒有續句（見 4.5）。
 - [x] 離線 + 端到端 + 舊回歸測試都過（`scripts/test_endpointer.py`、
-      `scripts/test_ws_audio_asr.py`、`scripts/test_ws_audio.py`）。
-- [ ] 待補：真人語音下的斷句準度與 VAD 參數微調。
+      `scripts/test_coalesce.py`、`scripts/test_ws_audio_asr.py`、
+      `scripts/test_ws_audio.py`）。
 
 ### 4.3 接上既有 LLM streaming 邏輯（約 0.5–1 天）— 已完成 2026-08-29
 - [x] ASR 出來的文字丟給 `llm_stream()`（跟 `/api/chat/stream` 同一個 helper）。
@@ -114,13 +118,18 @@
 | `reply_done` | `latency_ms` | LLM 回覆結束 |
 | `error` | `error` | 任一步出錯 |
 
+> `transcript` 送出後不會馬上有 `reply_delta`——後端會先等續句合併窗
+> （`VOICE_COALESCE_MS`，見 4.5 + asr-42-vad-plan 第 8 節），可能再來一個
+> `transcript`，最後才一次 `reply_delta`…`reply_done`。
+
 ### 4.4 前端串接（約 0.5 天）— 已完成 2026-08-29
 - [x] `demo-imood-dashboard.html` 的 WS `onmessage` → `handleVoiceMessage()`，
       處理 ack / asr_start / asr_empty / transcript / reply_delta / reply_done / error。
-- [x] transcript 進來 → `appendMessage('user', text)` + `setEmotion(detectEmotion(text))`。
-- [x] reply_delta → 逐段 append 進新的 avatar message（`voiceReplyBodyEl`），
-      reply_done 時 `setEmotion(detectEmotion(整段回覆))`。跟打字模式共用
-      `appendMessage` / `setEmotion`。
+- [x] transcript 進來 → `appendMessage('user', text)` + `setEmotion(detectEmotion(text))`；
+      **不建 avatar 泡泡**（可能還有續句）。
+- [x] 第一個 reply_delta 才建 avatar 泡泡（`voiceReplyBodyEl`），之後逐段 append，
+      reply_done 時 `setEmotion(detectEmotion(整段回覆))`。多段 transcript →
+      一個回覆泡泡。跟打字模式共用 `appendMessage` / `setEmotion`。
 - [x] 頂端狀態膠囊 `setStatus()`：聆聽中 / 辨識中… / 回覆中…（`state-busy`
       橘色脈動）。`enableMic` / `disableMic` 也連動。
 - [x] 瀏覽器實測：真的連 `/ws/audio` 串 TTS 語音 → 出現 user 訊息 + 逐字回覆
@@ -150,25 +159,26 @@
   （如 FunASR 的 Paraformer-streaming），複雜度高很多，這階段先不碰。
 - **text2voice / streaming TTS**：這次會議已決定暫緩，等 voice-only
   端到端跑通再撿回來。
-- **JoyGen 對接（人臉影片）**：品靜那邊還在實作 streaming endpoint，
-  `/ws/audio` 裡的 `# TODO forward to JoyGen` 掛勾點先留著，不用主動去等。
+- **JoyGen 對接（人臉影片）**：品靜那邊還在實作 streaming endpoint。JoyGen
+  吃的是 **LLM 回覆的 TTS 音訊**（8/29 確認），所以對接點在未來的 TTS 那條路，
+  不在 `/ws/audio`（原本放在這裡的 `# TODO forward to JoyGen` 已移除）。
+- **barge-in / 雙講**：使用者在 avatar 回話時插話打斷，第一版不處理。
 
-## 6. 還沒拍板、要主動找學長確認的風險
+## 6. 風險點狀態
 
-1. **音訊 buffer 的分工**：加了 ASR 之後，`/ws/audio` 收到的 PCM 會被拿去
-   做語音辨識；但將來 JoyGen 側也需要吃同一份音訊來驅動嘴型（audio2motion）。
-   兩邊要不要共用同一份 buffer？要不要分流成兩條 pipeline？這個沒問清楚
-   會影響 4.2 的實作方式，**建議動工前先確認**。
-2. **VAD 靜音閾值**：抓多長算「講完一句話」，這會影響使用者體驗（太短切斷
-   語句、太長等太久），沒有標準答案，需要現場試講調整，記錄下最後選定的
-   數值跟理由。
-3. **ASR 模型大小 vs 延遲**：桌機算力比筆電好，但還是要實測 small/base/
-   medium 在真實中文語句上的延遲跟準確度，才能決定要不要換更大的模型。
+1. ~~**音訊 buffer 的分工**~~ **已解決**：品靜 8/29 確認 JoyGen audio2motion
+   吃的是 LLM 回覆的 TTS 音訊，不是使用者輸入 PCM → `/ws/audio` 的 buffer
+   純 ASR 用，沒有共用問題。
+2. **VAD 靜音閾值** — 進行中：起始 700 → 量測後 900ms + 續句合併（1000ms）。
+   還要用**真人對話語音**現場調、定案（見 4.5 待做）。
+3. ~~**ASR 模型大小 vs 延遲**~~ **已解決**：small/base/medium 都實測過，選
+   `small`（見 4.1 / asr-41-results.md）。medium 留作 fallback。
 
 ## 7. 完成後要更新的文件
 
-- [ ] `docs/streaming-architecture-analysis.md` 第 6 節：把這次的 ASR
-      工作項目從「待辦」搬到「已完成」，補上實測的延遲數據。
-- [ ] `README.md`：補上 ASR 啟動方式（要不要額外下載模型、環境變數等）。
-- [ ] 這份文件（`docs/asr-todo.md`）：完成後可以整份標記為 done 或直接
-      刪除，內容併回 `streaming-architecture-analysis.md`。
+- [x] `docs/streaming-architecture-analysis.md` 第 6 節：ASR 工作項目已搬到
+      「已完成」（commit 270c513）。端到端實測延遲見 asr-42-vad-plan 第 7 節。
+- [x] `README.md`：voice-only 章節已更新成「ASR → LLM 端到端」，補了 ASR
+      啟動方式（額外依賴、模型下載）。
+- [ ] 這份文件：4.5 真人對話語音測試做完後，可整份標記 done 或併回
+      `streaming-architecture-analysis.md`。

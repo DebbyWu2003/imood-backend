@@ -1,11 +1,13 @@
 # 4.2 VAD 斷句 + 音訊 buffer — 實作計畫
 
-負責人：映潔　日期：2026-08-29（更新：已跟品靜確認 JoyGen 音訊來源）
-對應：`docs/asr-todo.md` 第 4.2 節、第 6 節風險 1（buffer 分工）與 2（靜音閾值）
+負責人：映潔　日期：2026-08-29（同日續作：VAD 參數量測後調整 + 續句合併）
+對應：`docs/asr-todo.md` 第 4.2 / 4.3 / 4.4 / 4.5 節、第 6 節風險 1、2
 前置：`docs/asr-41-results.md`（選型已定 = faster-whisper `small`，CPU/int8）
 
-這份文件把 todo 第 6 節兩個「還沒拍板」的風險點收斂成可以直接動工的參數與
-設計，數值都標成「起始值」，要照下方調整流程現場調。
+這份文件原本只寫 4.2 的 VAD 參數與 buffer 設計，後來把 4.3（接 LLM）、
+4.4（前端）、4.5（延遲量測）、續句合併也一起收進來（第 6、7、8 節）。
+VAD 參數的「起始值」多數已依第 7 節的量測調過，但真人**對話**語音的現場調
+還沒做。
 
 ---
 
@@ -19,10 +21,11 @@
   一個單純的 accumulator 就好。JoyGen 那條由未來的 TTS / 回覆端另外餵，跟這條
   輸入路徑無關（TTS 目前暫緩，見 `docs/asr-todo.md` 第 5 節）。
 - **`server.py` 的 `# TODO forward to JoyGen`**：這個掛勾點放錯位置了（轉送
-  使用者麥克風 PCM 給 JoyGen 不是設計），4.2 實作時移除；JoyGen 對接改到
-  之後 TTS 那條路上做。
-- **VAD 靜音閾值：起始 700ms**，往長的那端偏（陪伴型 app，切斷正在傾訴的人
-  比晚 1 秒回應更糟）。完整參數見第 2 節。
+  使用者麥克風 PCM 給 JoyGen 不是設計），4.2 實作時**已移除**；JoyGen 對接
+  改到之後 TTS 那條路上做。
+- **VAD 靜音閾值：700 → 900ms**（往長的那端偏，陪伴型 app 切斷傾訴的人比晚
+  回應更糟；量測後調整，見第 7 節）。**外加續句合併**（第 8 節）處理殘餘切段。
+  完整參數見第 2 節。
 
 ---
 
@@ -32,9 +35,9 @@
 
 - 前端 chunk 固定 **320ms**（5120 sample @ 16kHz / mono / 16-bit PCM），對齊
   JoyGen diffusion decoder 的 8-frame batch @25fps，**不要改**。
-- 所以靜音偵測的時間解析度就是 320ms：700ms 的門檻實際會在連續 2–3 個「靜音
-  chunk」（640–960ms）才判定。可接受。要更細只能改前端 chunk 大小，代價是
-  跟 JoyGen 對齊失效，不划算。
+- 所以靜音偵測的時間解析度就是 320ms：900ms 的門檻實際會在連續 3–4 個「靜音
+  chunk」（960–1280ms）才判定。可接受。要更細只能改前端 chunk 大小，代價是
+  跟 JoyGen 對齊失效，不划算。（實作是切成 20ms 子 frame 累計，不是整 chunk。）
 
 ### 2.2 起始參數表
 
@@ -99,13 +102,16 @@ JoyGen 不吃這條 PCM（見第 1 節），所以不用 tee、不用擔心兩�
    append 進語句 buffer ＋ 跑 VAD 更新靜音計數
                      │
                      ▼
-   靜音 ≥ 700ms 或 buffer ≥ 15s？
+   句尾靜音 ≥ end_silence_ms(900) 或 buffer ≥ 15s？
                      │ 是
                      ▼
    有聲音訊 ≥ 400ms？──否──▶ 丟棄 buffer，重新開始
                      │ 是
                      ▼
-   切走累積的 buffer → faster-whisper 辨識 → 清空 → 準備收下一句
+   切走累積的 buffer → faster-whisper 辨識 → transcript
+                     │
+                     ▼
+   放進 pending，等續句合併窗（第 8 節）→ 併起來丟 llm_stream()
 ```
 
 要點：
@@ -139,14 +145,16 @@ JoyGen 不吃這條 PCM（見第 1 節），所以不用 tee、不用擔心兩�
 
 ## 5. 完成後更新
 
-- 本文件第 2.4 節：填入**現場用真人語音**調過的 VAD 數值 + 理由（目前是起始值）。
-- `docs/streaming-architecture-analysis.md` 第 6 節：4.5 真人測試 + 延遲量測做完
-  後，把 ASR 工作項目搬到「已完成」、補端到端實測延遲。
-- `docs/asr-todo.md`：4.2 / 4.3 / 4.4 已打勾，剩 4.5。
+- 本文件第 2.4 節：用**真人對話語音**現場調過的 VAD 數值 + 理由（目前是
+  FLEURS 朗讀量測後的值，見第 7 節）。
+- `docs/streaming-architecture-analysis.md` 第 6 節：已搬到「已完成」
+  （commit 270c513）；4.5 真人對話測試做完後補最終延遲。
+- `docs/asr-todo.md`：4.1–4.4 已打勾，4.5 首輪 + 續句合併已打勾，剩真人對話測試。
+- `README.md`：voice-only 章節已更新。
 
 ---
 
-## 6. 實作狀態（4.2 + 4.3 + 4.4 完成，2026-08-29）
+## 6. 實作狀態（4.2 / 4.3 / 4.4 完成，4.5 首輪 + 續句合併完成，2026-08-29）
 
 - **`voice_asr.py`**（repo 根目錄，不依賴 FastAPI）：
   - `Endpointer` —— 第 2、3 節的 VAD 狀態機。`feed(chunk) -> Utterance | None`。

@@ -236,9 +236,10 @@ side 現況，規劃可平行推進的工作。
       1.6%、真人朗讀難詞域 CER 6.2%；一句辨識 RTF ~0.2–0.5x。`medium` 難詞域
       較好但慢 2.5x，留作 fallback。
 - [x] **VAD 斷句 + buffer**（4.2，見 `docs/asr-42-vad-plan.md`）：`voice_asr.py`
-      的 `Endpointer`——webrtcvad(mode 2) + 自適應能量門檻，連續靜音 700ms
-      （起始值）判定句尾，整段丟 faster-whisper 辨識。buffer 純 ASR 用（不跟
-      JoyGen 共用）。
+      的 `Endpointer`——webrtcvad(mode 2) + 自適應能量門檻，連續靜音 900ms
+      （量測後從 700 調整）判定句尾，整段丟 faster-whisper 辨識。buffer 純
+      ASR 用（不跟 JoyGen 共用）。**續句合併**：句尾判定後等 1s 靜音看有沒有
+      續句，被 VAD 切成兩段的一個念頭會併起來只回一次。
 - [x] **接上 LLM streaming**（4.3）：`/ws/audio` 辨識出文字後丟給
       `llm_stream()`（跟 `/api/chat/stream` 共用 helper），逐段回
       `reply_delta` → `reply_done`。所有 WS 訊息都有 `type` 欄位：
@@ -248,10 +249,11 @@ side 現況，規劃可平行推進的工作。
       `handleVoiceMessage()` 接上述訊息，transcript → user 訊息、reply_delta
       逐字 append 進 avatar 訊息（跟打字模式共用 `appendMessage` / `setEmotion`），
       頂端狀態膠囊顯示 聆聽中 / 辨識中… / 回覆中…。瀏覽器實測過。
-- [ ] **4.5 真人語音測試 + 延遲量測**（唯一還沒做的 ASR 項目）：真人講話測
-      斷句準度、量「講完 → 看到回覆」秒數、現場調 VAD 參數。遠端連線無法
-      當場錄音，用 podcast 片段或組員語音訊息（見 `docs/asr-41-results.md`
-      替代測試法）。
+- [~] **4.5 延遲量測**（`scripts/measure_e2e.py`）：首輪用 FLEURS 15 句真人
+      朗讀跑過——VAD 句尾判定 ~1s、ASR ~2s (RTF ~0.4x)、LLM 首字 ~0.15s、
+      **講完 → 看到回覆開始 ~3s**（casual 短句估 ~3–3.5s）。瓶頸是 ASR 與 LLM
+      生成，各佔一半。詳見 asr-42-vad-plan 第 7 節。
+      **還沒做**：真人**對話**語音（非朗讀）測斷句準度、VAD 參數定案。
 - [~] **調查中文 streaming TTS 選項**：因為決定先走 voice-only，這個子
       任務暫緩，等 voice-only 端到端跑通、且確定要做 text2voice 時再撿回來
       （候選方向仍是 Edge-TTS / PaddleSpeech TTS streaming / CosyVoice /

@@ -4,6 +4,7 @@
 #   venv\Scripts\python -m pip install -r requirements-asr.txt
 
 sounddevice        # scripts/record_wav.py 錄麥克風
-soundfile          # scripts/record_wav.py 寫 wav
+soundfile          # scripts/record_wav.py 寫 wav、scripts/measure_e2e.py 讀 wav
 edge-tts           # scripts/gen_tts_samples.py 產生合成測試語音
 opencc             # scripts/asr_eval.py 繁簡統一後再算 CER
+# numpy 已隨 faster-whisper 一起裝（requirements.txt）

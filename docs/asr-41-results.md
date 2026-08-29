@@ -33,10 +33,13 @@
 安裝：
 ```
 python -m venv venv
-venv\Scripts\python -m pip install -r requirements-asr.txt
+venv\Scripts\python -m pip install -r requirements.txt      # faster-whisper 等
+venv\Scripts\python -m pip install -r requirements-asr.txt  # 評估/測試用的額外依賴
 ```
-（ASR 依賴先獨立放 `requirements-asr.txt`，還沒併進正式 `requirements.txt` /
-`server.py`，等 4.2 確定要用再合併。）
+> 本文件寫於 4.1 當時，ASR 依賴曾獨立放 `requirements-asr.txt`。4.2/4.3 把
+> faster-whisper + webrtcvad-wheels 接進 `server.py` 後，這兩個已移到正式
+> `requirements.txt`（釘版本）；`requirements-asr.txt` 現在只剩評估/測試工具
+> （sounddevice / soundfile / edge-tts / opencc）。
 
 ## 新增檔案（都沒動 server.py）
 
