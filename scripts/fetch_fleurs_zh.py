@@ -17,9 +17,15 @@ import argparse
 import csv
 import io
 import json
+import sys
 import tarfile
 import urllib.request
 from pathlib import Path
+
+try:  # Windows 主控台預設 cp950，印中文會爆
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 BASE = "https://huggingface.co/datasets/google/fleurs/resolve/main/data/cmn_hans_cn"
 SPLIT = "dev"  # dev.tar.gz 217MB < test.tar.gz 525MB，串流只讀前面所以無所謂

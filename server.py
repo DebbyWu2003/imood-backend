@@ -22,17 +22,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from llama_cpp import Llama
+import asyncio
 import json
 import time
+
+from voice_asr import Endpointer, Transcriber
 
 MODEL_PATH = "./models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 N_CTX = 2048
 N_THREADS = 8  # 依機器 CPU 核心數調整
 
-# voice-only 輸入路徑：JoyGen/audio2motion 只吃 16kHz / 單聲道 / 16-bit PCM
-# （8/25 品靜回覆，見 docs/streaming-architecture-analysis.md 第 2 節）
+# voice-only 輸入路徑：麥克風送 16kHz / 單聲道 / 16-bit PCM 進來，後端做 VAD
+# 斷句 + ASR（見 docs/asr-42-vad-plan.md）。
+# 註：JoyGen/audio2motion 吃的是「LLM 回覆的 TTS 音訊」不是這條使用者輸入
+# （品靜 2026-08-29 確認），所以這條 PCM 只給 ASR 用。
 PCM_SAMPLE_RATE = 16000
 PCM_SAMPLE_WIDTH_BYTES = 2  # 16-bit
+
+ASR_MODEL_SIZE = "small"  # 選型見 docs/asr-41-results.md
 
 SYSTEM_PROMPT = (
     "你是 imood，一個溫暖、有同理心的陪伴型虛擬人。"
@@ -50,17 +57,22 @@ app.add_middleware(
 )
 
 llm: Optional[Llama] = None
+transcriber: Optional[Transcriber] = None
+# faster-whisper / ctranslate2 對同一個 model 併發呼叫不保證安全，序列化
+_asr_lock = asyncio.Lock()
 
 
 @app.on_event("startup")
 def load_model():
-    global llm
+    global llm, transcriber
     llm = Llama(
         model_path=MODEL_PATH,
         n_ctx=N_CTX,
         n_threads=N_THREADS,
         verbose=False,
     )
+    transcriber = Transcriber(model_size=ASR_MODEL_SIZE)
+    transcriber.load()
 
 
 class ChatRequest(BaseModel):
@@ -141,19 +153,22 @@ def chat_stream(req: ChatRequest):
 @app.websocket("/ws/audio")
 async def audio_stream(websocket: WebSocket):
     """
-    Voice-only 輸入路徑的接收端。
+    Voice-only 輸入路徑的接收端（見 docs/asr-42-vad-plan.md）。
 
     前端麥克風經 AudioWorklet 即時 resample 成 16kHz / mono / 16-bit PCM，
-    每個 chunk（預設 320ms，對齊 JoyGen diffusion decoder 的 8-frame batch
-    @25fps）以 binary frame 送過來。
+    每個 chunk（預設 320ms）以 binary frame 送過來。後端：
 
-    JoyGen audio2motion 目前還沒有可對接的 streaming endpoint（品靜那邊還
-    在實作，見 docs/streaming-architecture-analysis.md 第 3、6 節），所以
-    這裡先只做格式驗證＋log，把「JoyGen 人臉影片」那塊留白。等對方 endpoint
-    就緒後，把下面 `# TODO forward to JoyGen` 那行換成實際轉送邏輯即可，
-    前端這條路徑完全不用改。
+      1. 每個 chunk 回一個 {"type":"ack", ...}（沿用舊格式，方便前端顯示
+         「錄音中」狀態、也讓 scripts/test_ws_audio.py 的回歸測試繼續過）。
+      2. 把 chunk 餵進 Endpointer 累積成一句話，偵測到句尾靜音就整段丟去
+         faster-whisper 辨識，回一個 {"type":"transcript", "text": ...}。
+
+    4.3 會在這裡把 transcript 再接給 LLM，多回 {"type":"reply_delta", ...}。
     """
     await websocket.accept()
+
+    endpointer = Endpointer()
+    loop = asyncio.get_running_loop()
     chunk_count = 0
     byte_count = 0
     start = time.time()
@@ -162,6 +177,7 @@ async def audio_stream(websocket: WebSocket):
             data = await websocket.receive_bytes()
             if len(data) % PCM_SAMPLE_WIDTH_BYTES != 0:
                 await websocket.send_json({
+                    "type": "error",
                     "error": f"chunk 長度 {len(data)} bytes 不是 16-bit PCM 的整數倍",
                 })
                 continue
@@ -171,14 +187,37 @@ async def audio_stream(websocket: WebSocket):
             n_samples = len(data) // PCM_SAMPLE_WIDTH_BYTES
             chunk_ms = n_samples / PCM_SAMPLE_RATE * 1000
 
-            # TODO forward to JoyGen: 品靜的 audio2motion streaming endpoint
-            # 就緒後，把這個 chunk 的 raw PCM16 bytes（`data`）轉送過去。
-
             await websocket.send_json({
+                "type": "ack",
                 "ack": chunk_count,
                 "chunk_ms": round(chunk_ms, 1),
                 "total_bytes": byte_count,
             })
+
+            utterance = endpointer.feed(data)
+            if utterance is None:
+                continue
+
+            if transcriber is None or not transcriber.ready:
+                await websocket.send_json({"type": "error", "error": "ASR 模型尚未載入完成"})
+                continue
+
+            async with _asr_lock:
+                result = await loop.run_in_executor(
+                    None, transcriber.transcribe, utterance.pcm
+                )
+            print(
+                f"[voice] utterance {utterance.duration_ms:.0f}ms "
+                f"(voiced {utterance.voiced_ms:.0f}ms) -> ASR {result.latency_ms}ms "
+                f"RTF {result.latency_ms / max(result.audio_ms, 1):.2f}x: {result.text!r}"
+            )
+            if result.text:
+                await websocket.send_json({
+                    "type": "transcript",
+                    "text": result.text,
+                    "audio_ms": round(utterance.duration_ms),
+                    "asr_latency_ms": result.latency_ms,
+                })
     except WebSocketDisconnect:
         elapsed = time.time() - start
         print(

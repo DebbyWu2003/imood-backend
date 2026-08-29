@@ -83,14 +83,15 @@
 - [ ] 如果 `small` 品質不夠，再試 `base` 或 `medium`，記錄各自的延遲/
       品質權衡，決定要用哪個。
 
-### 4.2 VAD 斷句邏輯（約 0.5–1 天）
-- [ ] 在 `/ws/audio` 裡把收到的 PCM chunk 累積進一個 buffer（目前是收了
-      就丟，要改成暫存）。
-- [ ] 加入靜音偵測（可以用 `webrtcvad` 這個套件，或先簡單用能量閾值
-      threshold 判斷），偵測到連續靜音（初始建議抓 600ms–1s，之後現場
-      調）就判定「這句話講完了」。
-- [ ] 觸發判定後，把累積的 buffer 丟去做 ASR（4.1 驗證過的那支邏輯搬進來）。
-- [ ] 清空 buffer，準備收下一句。
+### 4.2 VAD 斷句邏輯（約 0.5–1 天）— 已完成 2026-08-29，見 docs/asr-42-vad-plan.md
+- [x] 在 `/ws/audio` 裡把收到的 PCM chunk 累積進一個 buffer。
+- [x] 靜音偵測：`webrtcvad`（aggressiveness 2）+ 自適應能量門檻，連續靜音
+      700ms（起始值，待真人語音現場調）判定「這句話講完了」。
+- [x] 觸發後把累積 buffer 丟去 faster-whisper 辨識（`voice_asr.Transcriber`）。
+- [x] 清空 buffer、準備收下一句；太短的語句丟棄。
+- [x] 離線 + 端到端 + 舊回歸測試都過（`scripts/test_endpointer.py`、
+      `scripts/test_ws_audio_asr.py`、`scripts/test_ws_audio.py`）。
+- [ ] 待補：真人語音下的斷句準度與 VAD 參數微調。
 
 ### 4.3 接上既有 LLM streaming 邏輯（約 0.5–1 天）
 - [ ] ASR 出來的文字，用跟 `/api/chat/stream` 一樣的方式丟給

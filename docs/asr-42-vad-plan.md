@@ -130,7 +130,35 @@ JoyGen 不吃這條 PCM（見第 1 節），所以不用 tee、不用擔心兩�
 
 ## 5. 完成後更新
 
-- 本文件第 2.4 節：填入最終選定的 VAD 數值 + 理由。
-- `docs/streaming-architecture-analysis.md` 第 6 節：ASR 工作項目搬到「已完成」，
-  補實測延遲。
-- `docs/asr-todo.md`：4.2 打勾，往 4.3（接 LLM streaming）。
+- 本文件第 2.4 節：填入**現場用真人語音**調過的 VAD 數值 + 理由（目前是起始值）。
+- `docs/streaming-architecture-analysis.md` 第 6 節：等 4.3 + 4.4 也做完再一起把
+  ASR 工作項目搬到「已完成」、補端到端實測延遲。
+- `docs/asr-todo.md`：4.2 已打勾。
+
+---
+
+## 6. 實作狀態（4.2 已完成，2026-08-29）
+
+- **`voice_asr.py`**（repo 根目錄，不依賴 FastAPI）：
+  - `Endpointer` —— 第 2、3 節的 VAD 狀態機。`feed(chunk) -> Utterance | None`。
+    參數見 `EndpointConfig`，目前是第 2.2 節的起始值。webrtcvad 用
+    `webrtcvad-wheels`（py3.13/Windows 有預編 wheel）。RMS 用 numpy 算
+    （py3.13 拿掉了 `audioop`）。
+  - `Transcriber` —— 包 faster-whisper `small`，PCM bytes -> 中文（直接吃
+    numpy float32，不落地暫存檔）。
+- **`server.py` `/ws/audio`**：每個 chunk 回 `{"type":"ack",...}`（沿用舊格式
+  + 加 `type`），餵進 per-connection `Endpointer`，斷句後在 thread pool
+  （`_asr_lock` 序列化）跑辨識，回 `{"type":"transcript","text",...}`。
+  舊的 `# TODO forward to JoyGen` 已移除。
+- **啟動**：`server.py` startup 除了 llama.cpp 也載入 faster-whisper（~2s）。
+  `requirements.txt` 已加 `faster-whisper==1.2.1` + `webrtcvad-wheels==2.0.14`。
+- **測試**：
+  - `scripts/test_endpointer.py` —— 離線：合成「兩句 + 中間停頓」串流，驗斷句
+    數量 + 接辨識。不需要 server。
+  - `scripts/test_ws_audio_asr.py` —— 端到端：串流進 `/ws/audio`，驗有回
+    transcript。
+  - `scripts/test_ws_audio.py` —— 舊的格式回歸測試，仍過（ack/error 格式相容）。
+- **實測**（合成語音、非真人）：5.8s 語句辨識 ~2.1s（RTF ~0.35x），
+  3.7s 語句 ~1.9s（RTF ~0.5x）。斷句尾靜音穩定落在設定的 700ms。
+- **尚未驗證**：真人語音下的斷句準度與 VAD 參數（要用真實口語或真人語音訊息
+  測，見 `docs/asr-41-results.md` 替代測試法）。barge-in、雙講不處理。

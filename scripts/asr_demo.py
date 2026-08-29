@@ -28,6 +28,11 @@ import sys
 import time
 from pathlib import Path
 
+try:  # Windows 主控台預設 cp950，印中文會爆
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # 繁體中文輸出的提示語：Whisper 對中文預設偏向輸出簡體，
 # 用 initial_prompt 稍微把輸出風格拉回繁體 / 台灣用語。
 DEFAULT_ZH_PROMPT = "以下是台灣人的日常對話，請以繁體中文輸出。"

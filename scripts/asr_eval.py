@@ -20,6 +20,11 @@ import sys
 import time
 from pathlib import Path
 
+try:  # Windows 主控台預設 cp950，印中文會爆
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # 比對前只留下「字」（CJK / 英數），標點、空白、省略號等全部去掉
 NON_WORD = re.compile(r"[^\w]", re.UNICODE)
 

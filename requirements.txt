@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 llama-cpp-python
 pydantic
+
+# voice-only ASR（/ws/audio 的 VAD 斷句 + 語音辨識，見 docs/asr-42-vad-plan.md）
+faster-whisper==1.2.1
+webrtcvad-wheels==2.0.14

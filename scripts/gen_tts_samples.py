@@ -21,6 +21,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:  # Windows 主控台預設 cp950，印中文會爆
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # (語者, 語速) 組合；語速 +N% 模擬講快一點
 VOICE_PROFILES = [
     ("zh-TW-HsiaoChenNeural", "+0%"),
