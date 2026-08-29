@@ -58,8 +58,10 @@ app.add_middleware(
 
 llm: Optional[Llama] = None
 transcriber: Optional[Transcriber] = None
-# faster-whisper / ctranslate2 對同一個 model 併發呼叫不保證安全，序列化
+# faster-whisper / ctranslate2 與 llama.cpp 對同一個 model 併發呼叫都不保證
+# 安全，各用一把 lock 序列化（主要是保護 /ws/audio 這條路）
 _asr_lock = asyncio.Lock()
+_llm_lock = asyncio.Lock()
 
 
 @app.on_event("startup")
@@ -84,6 +86,46 @@ class ChatResponse(BaseModel):
     latency_ms: int
 
 
+# ------------------------------------------------------------
+# LLM helper —— /api/chat、/api/chat/stream、/ws/audio 共用同一套
+# prompt 組裝與生成參數，避免三個地方各寫一份。
+# ------------------------------------------------------------
+
+LLM_MAX_TOKENS = 200
+LLM_TEMPERATURE = 0.7
+
+
+def _build_messages(user_text: str) -> list:
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
+
+
+def llm_complete(user_text: str) -> str:
+    """非 streaming：回完整回覆文字。"""
+    result = llm.create_chat_completion(
+        messages=_build_messages(user_text),
+        max_tokens=LLM_MAX_TOKENS,
+        temperature=LLM_TEMPERATURE,
+    )
+    return result["choices"][0]["message"]["content"].strip()
+
+
+def llm_stream(user_text: str):
+    """streaming：逐段 yield 回覆文字 delta（同步 generator）。"""
+    stream = llm.create_chat_completion(
+        messages=_build_messages(user_text),
+        max_tokens=LLM_MAX_TOKENS,
+        temperature=LLM_TEMPERATURE,
+        stream=True,
+    )
+    for chunk in stream:
+        piece = chunk["choices"][0].get("delta", {}).get("content")
+        if piece:
+            yield piece
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     if llm is None:
@@ -94,18 +136,8 @@ def chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail="訊息不可為空")
 
     start = time.time()
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": text},
-    ]
-    result = llm.create_chat_completion(
-        messages=messages,
-        max_tokens=200,
-        temperature=0.7,
-    )
-    reply = result["choices"][0]["message"]["content"].strip()
+    reply = llm_complete(text)
     latency_ms = int((time.time() - start) * 1000)
-
     return ChatResponse(reply=reply, latency_ms=latency_ms)
 
 
@@ -115,9 +147,9 @@ def chat_stream(req: ChatRequest):
     SSE streaming 版本的 /api/chat。前端不能用 EventSource（那個只能發 GET），
     改用 fetch + ReadableStream 自己解析 "data: {...}\n\n" 這種格式。
 
-    之後接 JoyGen text2voice 時，可以比照這支的做法：把這裡的
-    `yield` 换成「把每個 delta 轉送給 JoyGen 的 streaming TTS endpoint」，
-    介面（逐字 SSE chunk）不用變。
+    wire 格式（跟 4.3 前就一樣，前端不用改）：
+      data: {"delta": "..."}          逐字
+      data: {"done": true, "latency_ms": N}
     """
     if llm is None:
         raise HTTPException(status_code=503, detail="模型尚未載入完成")
@@ -126,28 +158,51 @@ def chat_stream(req: ChatRequest):
     if not text:
         raise HTTPException(status_code=400, detail="訊息不可為空")
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": text},
-    ]
-
     def event_generator():
         start = time.time()
-        stream = llm.create_chat_completion(
-            messages=messages,
-            max_tokens=200,
-            temperature=0.7,
-            stream=True,
-        )
-        for chunk in stream:
-            delta = chunk["choices"][0].get("delta", {})
-            piece = delta.get("content")
-            if piece:
-                yield f"data: {json.dumps({'delta': piece}, ensure_ascii=False)}\n\n"
+        for piece in llm_stream(text):
+            yield f"data: {json.dumps({'delta': piece}, ensure_ascii=False)}\n\n"
         latency_ms = int((time.time() - start) * 1000)
         yield f"data: {json.dumps({'done': True, 'latency_ms': latency_ms}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+async def _stream_reply_to_ws(websocket: WebSocket, loop, user_text: str) -> None:
+    """
+    把同步的 llm_stream() generator 橋接成 async，逐段送 reply_delta，
+    最後送 reply_done。生成在 thread pool 跑，透過 queue 把 delta 丟回
+    event loop。
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    DONE = object()
+
+    def produce():
+        try:
+            for piece in llm_stream(user_text):
+                loop.call_soon_threadsafe(queue.put_nowait, piece)
+        except Exception as exc:  # noqa: BLE001 — 丟回主 coroutine 統一處理
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, DONE)
+
+    start = time.time()
+    fut = loop.run_in_executor(None, produce)
+    try:
+        while True:
+            item = await queue.get()
+            if item is DONE:
+                break
+            if isinstance(item, Exception):
+                await websocket.send_json({"type": "error", "error": f"LLM 生成失敗: {item}"})
+                break
+            await websocket.send_json({"type": "reply_delta", "delta": item})
+    finally:
+        await fut
+    await websocket.send_json({
+        "type": "reply_done",
+        "latency_ms": int((time.time() - start) * 1000),
+    })
 
 
 @app.websocket("/ws/audio")
@@ -156,14 +211,18 @@ async def audio_stream(websocket: WebSocket):
     Voice-only 輸入路徑的接收端（見 docs/asr-42-vad-plan.md）。
 
     前端麥克風經 AudioWorklet 即時 resample 成 16kHz / mono / 16-bit PCM，
-    每個 chunk（預設 320ms）以 binary frame 送過來。後端：
+    每個 chunk（預設 320ms）以 binary frame 送過來。後端回傳的 JSON 訊息
+    都有 "type" 欄位：
 
-      1. 每個 chunk 回一個 {"type":"ack", ...}（沿用舊格式，方便前端顯示
-         「錄音中」狀態、也讓 scripts/test_ws_audio.py 的回歸測試繼續過）。
-      2. 把 chunk 餵進 Endpointer 累積成一句話，偵測到句尾靜音就整段丟去
-         faster-whisper 辨識，回一個 {"type":"transcript", "text": ...}。
+      {"type":"ack",       "ack":N, "chunk_ms":.., "total_bytes":..}   每個 chunk
+      {"type":"transcript","text":.., "audio_ms":.., "asr_latency_ms":..} 一句話辨識完
+      {"type":"reply_delta","delta":".."}                              LLM 回覆逐段
+      {"type":"reply_done", "latency_ms":N}                            LLM 回覆結束
+      {"type":"error",     "error":".."}
 
-    4.3 會在這裡把 transcript 再接給 LLM，多回 {"type":"reply_delta", ...}。
+    流程：chunk → Endpointer 累積 → 句尾靜音 → faster-whisper 辨識 → transcript
+    → llm_stream() → 逐段 reply_delta → reply_done。辨識 / 生成期間主迴圈不讀
+    socket，使用者這時通常在聽不會講話，累積的（靜音）chunk 之後補收即可。
     """
     await websocket.accept()
 
@@ -209,20 +268,30 @@ async def audio_stream(websocket: WebSocket):
             print(
                 f"[voice] utterance {utterance.duration_ms:.0f}ms "
                 f"(voiced {utterance.voiced_ms:.0f}ms) -> ASR {result.latency_ms}ms "
-                f"RTF {result.latency_ms / max(result.audio_ms, 1):.2f}x: {result.text!r}"
+                f"RTF {result.latency_ms / max(result.audio_ms, 1):.2f}x: {result.text!r}",
+                flush=True,
             )
-            if result.text:
-                await websocket.send_json({
-                    "type": "transcript",
-                    "text": result.text,
-                    "audio_ms": round(utterance.duration_ms),
-                    "asr_latency_ms": result.latency_ms,
-                })
+            if not result.text:
+                continue
+
+            await websocket.send_json({
+                "type": "transcript",
+                "text": result.text,
+                "audio_ms": round(utterance.duration_ms),
+                "asr_latency_ms": result.latency_ms,
+            })
+
+            if llm is None:
+                await websocket.send_json({"type": "error", "error": "LLM 模型尚未載入完成"})
+                continue
+            async with _llm_lock:
+                await _stream_reply_to_ws(websocket, loop, result.text)
     except WebSocketDisconnect:
         elapsed = time.time() - start
         print(
             f"[voice] client disconnected: {chunk_count} chunks, "
-            f"{byte_count} bytes, {elapsed:.1f}s"
+            f"{byte_count} bytes, {elapsed:.1f}s",
+            flush=True,
         )
 
 

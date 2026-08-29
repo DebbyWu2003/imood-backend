@@ -93,16 +93,24 @@
       `scripts/test_ws_audio_asr.py`、`scripts/test_ws_audio.py`）。
 - [ ] 待補：真人語音下的斷句準度與 VAD 參數微調。
 
-### 4.3 接上既有 LLM streaming 邏輯（約 0.5–1 天）
-- [ ] ASR 出來的文字，用跟 `/api/chat/stream` 一樣的方式丟給
-      `llm.create_chat_completion(..., stream=True)`。
-- [ ] 把「ASR transcript」跟「LLM 回覆的每個 delta」都透過 `/ws/audio`
-      這條 WebSocket 送回前端（需要定義新的訊息格式，例如
-      `{"type": "transcript", "text": "..."}` 和
-      `{"type": "reply_delta", "delta": "..."}`，跟現在只有
-      `{"ack": ...}` 的格式分開，前端要能分辨）。
-- [ ] 想清楚：這段邏輯要不要跟 `/api/chat/stream` 共用同一個 helper
-      function，避免兩邊各寫一份 prompt 組裝邏輯（`SYSTEM_PROMPT` 那些）。
+### 4.3 接上既有 LLM streaming 邏輯（約 0.5–1 天）— 已完成 2026-08-29
+- [x] ASR 出來的文字丟給 `llm_stream()`（跟 `/api/chat/stream` 同一個 helper）。
+- [x] `/ws/audio` 送回 `transcript` → 一串 `reply_delta` → `reply_done`，
+      所有 JSON 訊息都有 `type` 欄位（協定見下 + `server.py` docstring）。
+- [x] 抽 `_build_messages()` / `llm_complete()` / `llm_stream()` 共用 helper，
+      `/api/chat`、`/api/chat/stream`、`/ws/audio` 三處共用；SSE wire 格式沒變。
+- [x] 同步 generator → async 的橋接（thread pool + queue），`_llm_lock` 序列化。
+- [x] 端到端測試 `scripts/test_ws_audio_asr.py`：2 句 → 2 transcript → 2 回覆。
+
+**`/ws/audio` 回傳訊息協定（4.4 前端照這個接）：**
+
+| type | 欄位 | 時機 |
+|---|---|---|
+| `ack` | `ack`, `chunk_ms`, `total_bytes` | 每個 chunk |
+| `transcript` | `text`, `audio_ms`, `asr_latency_ms` | 一句話辨識完 |
+| `reply_delta` | `delta` | LLM 回覆逐段（比照 SSE 的 `delta`） |
+| `reply_done` | `latency_ms` | LLM 回覆結束 |
+| `error` | `error` | 任一步出錯 |
 
 ### 4.4 前端串接（約 0.5 天）
 - [ ] `demo-imood-dashboard.html` 的 WebSocket `onmessage`（目前只有處理

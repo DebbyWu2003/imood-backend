@@ -1,8 +1,9 @@
 # ============================================================
-# /ws/audio 的端到端測試（4.2）：把合成的「兩句話 + 中間停頓」串流
-# 用 320ms chunk 餵進 WebSocket，檢查後端有沒有回 transcript。
+# /ws/audio 的端到端測試（4.2 + 4.3）：把合成的「兩句話 + 中間停頓」串流
+# 用 320ms chunk 餵進 WebSocket，檢查後端每句話有回：
+#   transcript → 一串 reply_delta → reply_done
 #
-# 需要先啟動後端：
+# 需要先啟動後端（要有 Qwen 模型）：
 #   venv\Scripts\python -m uvicorn server:app --port 8000
 # 然後：
 #   venv\Scripts\python scripts\test_ws_audio_asr.py
@@ -54,6 +55,8 @@ async def main() -> None:
 
     acks = 0
     transcripts = []
+    replies_done = 0
+    cur_reply = []
     async with websockets.connect(WS_URL, max_size=None) as ws:
         async def sender():
             for off in range(0, len(stream), CHUNK_BYTES):
@@ -63,24 +66,32 @@ async def main() -> None:
         send_task = asyncio.create_task(sender())
         try:
             while True:
-                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
                 t = msg.get("type")
                 if t == "ack":
                     acks += 1
                 elif t == "transcript":
                     transcripts.append(msg)
+                    cur_reply = []
                     print(f"  transcript: {msg['text']!r} "
                           f"(audio {msg.get('audio_ms')}ms, ASR {msg.get('asr_latency_ms')}ms)")
+                elif t == "reply_delta":
+                    cur_reply.append(msg["delta"])
+                elif t == "reply_done":
+                    replies_done += 1
+                    print(f"  reply ({msg.get('latency_ms')}ms): {''.join(cur_reply)!r}")
                 elif t == "error":
                     print(f"  error: {msg}")
-                if send_task.done() and len(transcripts) >= len(paths):
+                if send_task.done() and replies_done >= len(paths):
                     break
         except asyncio.TimeoutError:
-            print("  (等 transcript 逾時)")
+            print("  (等回覆逾時)")
 
-    print(f"\nacks={acks}, transcripts={len(transcripts)} (預期 {len(paths)})")
-    print("PASS" if len(transcripts) == len(paths) else "FAIL")
-    sys.exit(0 if len(transcripts) == len(paths) else 1)
+    ok = len(transcripts) == len(paths) and replies_done == len(paths)
+    print(f"\nacks={acks}, transcripts={len(transcripts)}, replies={replies_done} "
+          f"(預期 {len(paths)})")
+    print("PASS" if ok else "FAIL")
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
