@@ -102,24 +102,29 @@
 - [x] 同步 generator → async 的橋接（thread pool + queue），`_llm_lock` 序列化。
 - [x] 端到端測試 `scripts/test_ws_audio_asr.py`：2 句 → 2 transcript → 2 回覆。
 
-**`/ws/audio` 回傳訊息協定（4.4 前端照這個接）：**
+**`/ws/audio` 回傳訊息協定：**
 
 | type | 欄位 | 時機 |
 |---|---|---|
 | `ack` | `ack`, `chunk_ms`, `total_bytes` | 每個 chunk |
+| `asr_start` | `audio_ms` | 偵測到句尾靜音、開始辨識 |
+| `asr_empty` | — | 有聲音但辨識不出內容 |
 | `transcript` | `text`, `audio_ms`, `asr_latency_ms` | 一句話辨識完 |
 | `reply_delta` | `delta` | LLM 回覆逐段（比照 SSE 的 `delta`） |
 | `reply_done` | `latency_ms` | LLM 回覆結束 |
 | `error` | `error` | 任一步出錯 |
 
-### 4.4 前端串接（約 0.5 天）
-- [ ] `demo-imood-dashboard.html` 的 WebSocket `onmessage`（目前只有處理
-      `error`）要新增處理 `transcript` / `reply_delta` 兩種訊息類型。
-- [ ] transcript 進來時，呼叫既有的 `appendMessage('user', text)`。
-- [ ] reply_delta 進來時，比照 `callDialogueModelStream` 的做法逐字
-      append 進一個新的 avatar message，並呼叫 `setEmotion(detectEmotion(...))`。
-- [ ] UI 上要讓使用者看得出目前狀態（錄音中 / 辨識中 / LLM 回覆中），
-      避免使用者以為系統沒反應。
+### 4.4 前端串接（約 0.5 天）— 已完成 2026-08-29
+- [x] `demo-imood-dashboard.html` 的 WS `onmessage` → `handleVoiceMessage()`，
+      處理 ack / asr_start / asr_empty / transcript / reply_delta / reply_done / error。
+- [x] transcript 進來 → `appendMessage('user', text)` + `setEmotion(detectEmotion(text))`。
+- [x] reply_delta → 逐段 append 進新的 avatar message（`voiceReplyBodyEl`），
+      reply_done 時 `setEmotion(detectEmotion(整段回覆))`。跟打字模式共用
+      `appendMessage` / `setEmotion`。
+- [x] 頂端狀態膠囊 `setStatus()`：聆聽中 / 辨識中… / 回覆中…（`state-busy`
+      橘色脈動）。`enableMic` / `disableMic` 也連動。
+- [x] 瀏覽器實測：真的連 `/ws/audio` 串 TTS 語音 → 出現 user 訊息 + 逐字回覆
+      + 表情切換；JS 過 `node --check`。
 
 ### 4.5 真人測試 + 量測延遲（約 0.5 天）
 - [ ] 用真人講話（不同語速、有無雜音）測試斷句準不準。

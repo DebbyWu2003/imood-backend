@@ -131,13 +131,13 @@ JoyGen 不吃這條 PCM（見第 1 節），所以不用 tee、不用擔心兩�
 ## 5. 完成後更新
 
 - 本文件第 2.4 節：填入**現場用真人語音**調過的 VAD 數值 + 理由（目前是起始值）。
-- `docs/streaming-architecture-analysis.md` 第 6 節：等 4.3 + 4.4 也做完再一起把
-  ASR 工作項目搬到「已完成」、補端到端實測延遲。
-- `docs/asr-todo.md`：4.2 已打勾。
+- `docs/streaming-architecture-analysis.md` 第 6 節：4.5 真人測試 + 延遲量測做完
+  後，把 ASR 工作項目搬到「已完成」、補端到端實測延遲。
+- `docs/asr-todo.md`：4.2 / 4.3 / 4.4 已打勾，剩 4.5。
 
 ---
 
-## 6. 實作狀態（4.2 已完成，2026-08-29）
+## 6. 實作狀態（4.2 + 4.3 + 4.4 完成，2026-08-29）
 
 - **`voice_asr.py`**（repo 根目錄，不依賴 FastAPI）：
   - `Endpointer` —— 第 2、3 節的 VAD 狀態機。`feed(chunk) -> Utterance | None`。
@@ -146,19 +146,29 @@ JoyGen 不吃這條 PCM（見第 1 節），所以不用 tee、不用擔心兩�
     （py3.13 拿掉了 `audioop`）。
   - `Transcriber` —— 包 faster-whisper `small`，PCM bytes -> 中文（直接吃
     numpy float32，不落地暫存檔）。
-- **`server.py` `/ws/audio`**：每個 chunk 回 `{"type":"ack",...}`（沿用舊格式
-  + 加 `type`），餵進 per-connection `Endpointer`，斷句後在 thread pool
-  （`_asr_lock` 序列化）跑辨識，回 `{"type":"transcript","text",...}`。
-  舊的 `# TODO forward to JoyGen` 已移除。
+- **`server.py`**：
+  - 抽共用 helper `_build_messages` / `llm_complete` / `llm_stream`，
+    `/api/chat`、`/api/chat/stream`、`/ws/audio` 共用（4.3）。
+  - `/ws/audio`：per-connection `Endpointer`，斷句 → thread pool 辨識
+    （`_asr_lock`）→ `transcript` → `llm_stream()` 逐段 `reply_delta` → `reply_done`
+    （`_llm_lock`，同步 generator 用 thread+queue 橋接）。
+  - 訊息協定（都有 `type`）：`ack` / `asr_start` / `asr_empty` / `transcript` /
+    `reply_delta` / `reply_done` / `error`。舊 `# TODO forward to JoyGen` 已移除。
+- **`demo-imood-dashboard.html`**（4.4）：WS `onmessage` → `handleVoiceMessage()`
+  接上面所有訊息；transcript → `appendMessage('user',..)` + `setEmotion`，
+  reply_delta 逐段 append 進 avatar 訊息，跟打字模式共用 `appendMessage` /
+  `setEmotion`。頂端狀態膠囊 `setStatus()`：聆聽中 / 辨識中… / 回覆中…。
 - **啟動**：`server.py` startup 除了 llama.cpp 也載入 faster-whisper（~2s）。
   `requirements.txt` 已加 `faster-whisper==1.2.1` + `webrtcvad-wheels==2.0.14`。
+  需要 `models/qwen2.5-1.5b-instruct-q4_k_m.gguf`。
 - **測試**：
-  - `scripts/test_endpointer.py` —— 離線：合成「兩句 + 中間停頓」串流，驗斷句
-    數量 + 接辨識。不需要 server。
-  - `scripts/test_ws_audio_asr.py` —— 端到端：串流進 `/ws/audio`，驗有回
-    transcript。
-  - `scripts/test_ws_audio.py` —— 舊的格式回歸測試，仍過（ack/error 格式相容）。
-- **實測**（合成語音、非真人）：5.8s 語句辨識 ~2.1s（RTF ~0.35x），
-  3.7s 語句 ~1.9s（RTF ~0.5x）。斷句尾靜音穩定落在設定的 700ms。
-- **尚未驗證**：真人語音下的斷句準度與 VAD 參數（要用真實口語或真人語音訊息
-  測，見 `docs/asr-41-results.md` 替代測試法）。barge-in、雙講不處理。
+  - `scripts/test_endpointer.py` —— 離線：合成「兩句 + 中間停頓」，驗斷句數。
+  - `scripts/test_ws_audio_asr.py` —— 端到端：串流進 `/ws/audio`，驗
+    transcript → reply_delta* → reply_done。
+  - `scripts/test_ws_audio.py` —— 舊格式回歸測試，仍過。
+  - 瀏覽器實測：真的連 `/ws/audio` 串 TTS 語音 → DOM 出現 user 訊息 + 逐字
+    回覆 + 表情切換。
+- **實測**（合成語音、非真人）：一句「講完 → 回覆完」≈ ASR 2s + LLM 1–2s。
+  斷句尾靜音穩定落在 700ms。
+- **尚未驗證**：真人語音下的斷句準度與 VAD 參數（4.5，要用真實口語或真人
+  語音訊息測，見 `docs/asr-41-results.md` 替代測試法）。barge-in、雙講不處理。

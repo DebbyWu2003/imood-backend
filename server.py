@@ -215,6 +215,8 @@ async def audio_stream(websocket: WebSocket):
     都有 "type" 欄位：
 
       {"type":"ack",       "ack":N, "chunk_ms":.., "total_bytes":..}   每個 chunk
+      {"type":"asr_start", "audio_ms":..}                              偵測到句尾、開始辨識
+      {"type":"asr_empty"}                                             有聲音但辨識不出內容
       {"type":"transcript","text":.., "audio_ms":.., "asr_latency_ms":..} 一句話辨識完
       {"type":"reply_delta","delta":".."}                              LLM 回覆逐段
       {"type":"reply_done", "latency_ms":N}                            LLM 回覆結束
@@ -261,6 +263,9 @@ async def audio_stream(websocket: WebSocket):
                 await websocket.send_json({"type": "error", "error": "ASR 模型尚未載入完成"})
                 continue
 
+            # 讓前端知道「已偵測到句尾靜音、開始辨識」，避免使用者以為沒反應
+            await websocket.send_json({"type": "asr_start", "audio_ms": round(utterance.duration_ms)})
+
             async with _asr_lock:
                 result = await loop.run_in_executor(
                     None, transcriber.transcribe, utterance.pcm
@@ -272,6 +277,7 @@ async def audio_stream(websocket: WebSocket):
                 flush=True,
             )
             if not result.text:
+                await websocket.send_json({"type": "asr_empty"})
                 continue
 
             await websocket.send_json({

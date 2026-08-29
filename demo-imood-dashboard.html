@@ -71,6 +71,11 @@
     gap:6px;
   }
   .status-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--calm);}
+  .status-pill.state-listening{color:var(--calm);border-color:var(--calm);}
+  .status-pill.state-listening .dot{background:var(--calm);}
+  .status-pill.state-busy{color:var(--accent);border-color:var(--accent);}
+  .status-pill.state-busy .dot{background:var(--accent);animation:status-pulse 1s ease-in-out infinite;}
+  @keyframes status-pulse{0%,100%{opacity:1;}50%{opacity:0.25;}}
 
   .sidebar{
     grid-area:sidebar;
@@ -306,7 +311,7 @@
 <div class="app">
   <header>
     <div class="brand">imood.ai <small>情緒虛擬人對話 demo</small></div>
-    <div class="status-pill"><span class="dot"></span>文字輸入模式</div>
+    <div class="status-pill" id="status-pill"><span class="dot"></span><span id="status-text">文字輸入模式</span></div>
   </header>
 
   <aside class="sidebar">
@@ -405,6 +410,21 @@ const meterChips = document.querySelectorAll('.meter-chip');
 const micBtn = document.getElementById('mic-btn');
 const micTag = document.getElementById('mic-tag');
 const micMeterBar = document.getElementById('mic-meter-bar');
+const statusPill = document.getElementById('status-pill');
+const statusText = document.getElementById('status-text');
+
+// 頂端狀態膠囊：state = 'listening' | 'busy' | null
+function setStatus(text, state) {
+  statusText.textContent = text;
+  statusPill.classList.remove('state-listening', 'state-busy');
+  if (state) statusPill.classList.add('state-' + state);
+}
+
+// 回到閒置狀態：麥克風開著就是「聆聽中」，否則「文字輸入模式」
+function resetStatus() {
+  if (micStream) setStatus('🎤 聆聽中', 'listening');
+  else setStatus('文字輸入模式', null);
+}
 
 // ============================================================
 // JoyGen WebRTC 對接點（目前是空殼，等品靜那邊確認 track 可用後再實作）
@@ -529,6 +549,7 @@ async function handleSend() {
   setEmotion(detectEmotion(text));
 
   avatarFrame.classList.add('speaking');
+  setStatus('回覆中…', 'busy');
   const avatarDiv = appendMessage('avatar', '');
   const bodyEl = avatarDiv.querySelector('.body');
 
@@ -548,6 +569,7 @@ async function handleSend() {
   }
 
   avatarFrame.classList.remove('speaking');
+  resetStatus();
   sendBtn.disabled = false;
   textInput.focus();
 }
@@ -560,15 +582,13 @@ textInput.addEventListener('keydown', e => {
 // ============================================================
 // Voice-only 輸入路徑
 //
-// 品靜 8/25 回覆確認 JoyGen/audio2motion 只吃音訊，格式是
-// 16kHz / 單聲道 / 16-bit PCM，且切塊大小要對齊視訊 fps。這裡用
-// AudioWorklet 把麥克風原生取樣率（通常 48kHz）即時 downsample 成
-// 16kHz PCM16，每 320ms（= JoyGen diffusion decoder 的 8-frame batch
-// @25fps）送一個 chunk，透過 WebSocket 傳給後端 /ws/audio。
+// 用 AudioWorklet 把麥克風原生取樣率（通常 48kHz）即時 downsample 成
+// 16kHz / mono / 16-bit PCM，每 320ms 送一個 chunk，透過 WebSocket
+// 傳給後端 /ws/audio。
 //
-// JoyGen 那邊的 streaming endpoint 還沒開放（見 server.py 的
-// `/ws/audio` 註解），所以目前後端只會回 ack，不會真的驅動臉部影片；
-// 等品靜那邊就緒，只要換後端轉送邏輯，前端這條路徑不用改。
+// 後端（server.py /ws/audio）：累積 chunk → VAD 斷句 → faster-whisper
+// 辨識 → 丟給 Qwen 產生回覆，逐段串流回來。訊息協定見 handleVoiceMessage()。
+// 講完一句話 → 看到回覆，跟打字模式共用同一套 appendMessage / setEmotion。
 // ============================================================
 const AUDIO_WS_URL = 'ws://localhost:8000/ws/audio';
 const PCM_TARGET_SAMPLE_RATE = 16000;
@@ -631,11 +651,69 @@ function connectAudioSocket() {
   socket.onerror = (err) => console.error('[voice] /ws/audio 連線錯誤：', err);
   socket.onclose = () => console.log('[voice] /ws/audio 連線關閉');
   socket.onmessage = (evt) => {
-    // 目前後端只回 { ack, chunk_ms, total_bytes } 或 { error }，先印出來方便除錯。
-    const msg = JSON.parse(evt.data);
-    if (msg.error) console.warn('[voice] chunk 格式錯誤：', msg.error);
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch (e) { return; }
+    handleVoiceMessage(msg);
   };
   return socket;
+}
+
+// 目前正在串流的 avatar 回覆（voice 模式），跟打字模式的 avatarDiv 分開管理
+let voiceReplyBodyEl = null;
+let voiceReplyFull = '';
+
+// /ws/audio 回傳訊息的處理。訊息型別見 server.py 的 audio_stream() docstring：
+//   ack / asr_start / transcript / reply_delta / reply_done / asr_empty / error
+function handleVoiceMessage(msg) {
+  switch (msg.type) {
+    case 'ack':
+      // 每個 chunk 一個，收音狀態已由音量條反映，這裡不用處理
+      break;
+
+    case 'asr_start':
+      setStatus('辨識中…', 'busy');
+      break;
+
+    case 'asr_empty':
+      // 有聲音但辨識不出內容（雜音、太小聲），安靜回到聆聽狀態
+      resetStatus();
+      break;
+
+    case 'transcript':
+      appendMessage('user', msg.text);
+      setEmotion(detectEmotion(msg.text));
+      avatarFrame.classList.add('speaking');
+      voiceReplyFull = '';
+      voiceReplyBodyEl = appendMessage('avatar', '').querySelector('.body');
+      setStatus('回覆中…', 'busy');
+      break;
+
+    case 'reply_delta':
+      if (!voiceReplyBodyEl) {
+        avatarFrame.classList.add('speaking');
+        voiceReplyBodyEl = appendMessage('avatar', '').querySelector('.body');
+      }
+      voiceReplyFull += msg.delta;
+      voiceReplyBodyEl.textContent = voiceReplyFull;
+      transcriptBody.scrollTop = transcriptBody.scrollHeight;
+      break;
+
+    case 'reply_done':
+      if (voiceReplyFull) setEmotion(detectEmotion(voiceReplyFull));
+      voiceReplyBodyEl = null;
+      voiceReplyFull = '';
+      avatarFrame.classList.remove('speaking');
+      resetStatus();
+      break;
+
+    case 'error':
+      console.warn('[voice] 後端錯誤：', msg.error);
+      voiceReplyBodyEl = null;
+      voiceReplyFull = '';
+      avatarFrame.classList.remove('speaking');
+      resetStatus();
+      break;
+  }
 }
 
 async function enableMic() {
@@ -644,6 +722,7 @@ async function enableMic() {
   } catch (err) {
     console.error('取得麥克風權限失敗：', err);
     micTag.textContent = '權限被拒絕';
+    setStatus('麥克風權限被拒', null);
     return;
   }
 
@@ -687,6 +766,7 @@ async function enableMic() {
   micBtn.classList.add('recording');
   micTag.textContent = 'voice-only 已啟用';
   micTag.classList.add('on');
+  setStatus('🎤 聆聽中', 'listening');
 
   drawMicLevel();
 }
@@ -724,6 +804,10 @@ function disableMic() {
   micBtn.classList.remove('recording');
   micTag.textContent = '尚未啟用';
   micTag.classList.remove('on');
+  voiceReplyBodyEl = null;
+  voiceReplyFull = '';
+  avatarFrame.classList.remove('speaking');
+  setStatus('文字輸入模式', null);
 }
 
 micBtn.addEventListener('click', () => {
