@@ -125,11 +125,11 @@
 ### 4.4 前端串接（約 0.5 天）— 已完成 2026-08-29
 - [x] `demo-imood-dashboard.html` 的 WS `onmessage` → `handleVoiceMessage()`，
       處理 ack / asr_start / asr_empty / transcript / reply_delta / reply_done / error。
-- [x] transcript 進來 → `appendMessage('user', text)` + `setEmotion(detectEmotion(text))`；
+- [x] transcript 進來 → `appendMessage('user', text)` + `setEmotion(detectEmotion(text))`
+      （表情依使用者的話，跟打字模式一致——不在 reply_done 用中性回覆內容蓋回 calm）；
       **不建 avatar 泡泡**（可能還有續句）。
-- [x] 第一個 reply_delta 才建 avatar 泡泡（`voiceReplyBodyEl`），之後逐段 append，
-      reply_done 時 `setEmotion(detectEmotion(整段回覆))`。多段 transcript →
-      一個回覆泡泡。跟打字模式共用 `appendMessage` / `setEmotion`。
+- [x] 第一個 reply_delta 才建 avatar 泡泡（`voiceReplyBodyEl`），之後逐段 append。
+      多段 transcript → 一個回覆泡泡。跟打字模式共用 `appendMessage` / `setEmotion`。
 - [x] 頂端狀態膠囊 `setStatus()`：聆聽中 / 辨識中… / 回覆中…（`state-busy`
       橘色脈動）。`enableMic` / `disableMic` 也連動。
 - [x] 瀏覽器實測：真的連 `/ws/audio` 串 TTS 語音 → 出現 user 訊息 + 逐字回覆

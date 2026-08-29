@@ -8,6 +8,8 @@ __pycache__/
 # ASR 測試語音（可用 scripts/gen_tts_samples.py 或 scripts/record_wav.py 重生）
 samples/
 *.wav
+# demo 頁「播放範例語音」按鈕用的內建 wav，要進版控
+!demo-assets/sample-zh.wav
 
 # 匯出的報告 PDF（原始檔是 Artifact，不進版控）
 *.pdf

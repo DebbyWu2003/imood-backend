@@ -143,6 +143,19 @@
   }
   .mic-btn:hover{ border-color:var(--accent); }
   .mic-btn.recording{ border-color:var(--anger); color:var(--anger); }
+  .mic-btn:disabled{ opacity:0.4; cursor:not-allowed; border-color:var(--line); }
+  .mic-btn.playing{ border-color:var(--accent); color:var(--accent); }
+  .mic-hint{
+    margin-top:6px;
+    font-size:10px;
+    line-height:1.5;
+    color:var(--text-dim);
+  }
+  .mic-hint code{
+    font-family:var(--mono);
+    font-size:10px;
+    color:var(--text-mid);
+  }
   .mic-meter{
     margin-top:8px;
     height:6px;
@@ -332,6 +345,8 @@
     </div>
     <button id="mic-btn" class="mic-btn">🎤 啟用語音輸入（voice-only）</button>
     <div class="mic-meter" id="mic-meter"><div class="mic-meter-bar" id="mic-meter-bar"></div></div>
+    <button id="sample-btn" class="mic-btn">🔊 播放範例語音</button>
+    <div class="mic-hint">demo 用：不需麥克風，走跟語音輸入一樣的 <code>/ws/audio</code> pipeline</div>
 
     <div class="sidebar-divider"></div>
 
@@ -410,6 +425,7 @@ const meterChips = document.querySelectorAll('.meter-chip');
 const micBtn = document.getElementById('mic-btn');
 const micTag = document.getElementById('mic-tag');
 const micMeterBar = document.getElementById('mic-meter-bar');
+const sampleBtn = document.getElementById('sample-btn');
 const statusPill = document.getElementById('status-pill');
 const statusText = document.getElementById('status-text');
 
@@ -702,7 +718,8 @@ function handleVoiceMessage(msg) {
       break;
 
     case 'reply_done':
-      if (voiceReplyFull) setEmotion(detectEmotion(voiceReplyFull));
+      // 表情已在 transcript 進來時依使用者的話設好（跟打字模式一致，
+      // 避免這裡用中性的回覆內容把它蓋回 calm）
       voiceReplyBodyEl = null;
       voiceReplyFull = '';
       avatarFrame.classList.remove('speaking');
@@ -769,6 +786,7 @@ async function enableMic() {
   micBtn.classList.add('recording');
   micTag.textContent = 'voice-only 已啟用';
   micTag.classList.add('on');
+  sampleBtn.disabled = true;
   setStatus('🎤 聆聽中', 'listening');
 
   drawMicLevel();
@@ -807,6 +825,7 @@ function disableMic() {
   micBtn.classList.remove('recording');
   micTag.textContent = '尚未啟用';
   micTag.classList.remove('on');
+  sampleBtn.disabled = false;
   voiceReplyBodyEl = null;
   voiceReplyFull = '';
   avatarFrame.classList.remove('speaking');
@@ -820,6 +839,105 @@ micBtn.addEventListener('click', () => {
     enableMic();
   }
 });
+
+// ============================================================
+// 「播放範例語音」—— demo 用，不需麥克風。
+//
+// 讀一個內建的 16kHz/mono/16-bit PCM wav，前後墊靜音，以真實時間速率
+// (每 320ms 一個 chunk) 送進跟麥克風完全一樣的 /ws/audio pipeline，
+// 回來的 transcript / reply 由 handleVoiceMessage() 顯示在頁面上。
+// ============================================================
+const SAMPLE_WAV_URL = 'demo-assets/sample-zh.wav';
+let samplePlaying = false;
+
+async function loadWavPcm(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`載入 ${url} 失敗：${res.status}`);
+  const buf = await res.arrayBuffer();
+  const dv = new DataView(buf);
+  if (String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)) !== 'RIFF') {
+    throw new Error('不是 WAV 檔');
+  }
+  let off = 12;
+  while (off + 8 <= dv.byteLength) {
+    const id = String.fromCharCode(dv.getUint8(off), dv.getUint8(off + 1), dv.getUint8(off + 2), dv.getUint8(off + 3));
+    const size = dv.getUint32(off + 4, true);
+    if (id === 'data') return new Uint8Array(buf, off + 8, size);
+    off += 8 + size + (size & 1);
+  }
+  throw new Error('WAV 裡找不到 data chunk');
+}
+
+function endSamplePlayback() {
+  samplePlaying = false;
+  sampleBtn.disabled = false;
+  sampleBtn.classList.remove('playing');
+  sampleBtn.textContent = '🔊 播放範例語音';
+  if (!micStream) micBtn.disabled = false;
+  if (!voiceReplyBodyEl) resetStatus();
+}
+
+async function playSample() {
+  if (samplePlaying || micStream) return;
+  samplePlaying = true;
+  sampleBtn.disabled = true;
+  sampleBtn.classList.add('playing');
+  sampleBtn.textContent = '⏳ 播放中…';
+  micBtn.disabled = true;
+  setStatus('播放範例語音…', 'busy');
+
+  let pcm;
+  try {
+    pcm = await loadWavPcm(SAMPLE_WAV_URL);
+  } catch (err) {
+    console.error('[sample]', err);
+    setStatus('範例語音載入失敗', null);
+    endSamplePlayback();
+    return;
+  }
+
+  // 前墊 600ms 靜音（校正）、後墊 1600ms（讓 VAD 判定句尾）
+  const bytesFor = (ms) => Math.round(PCM_TARGET_SAMPLE_RATE * ms / 1000) * 2;
+  const chunkBytes = bytesFor(PCM_CHUNK_MS);
+  const stream = new Uint8Array(bytesFor(600) + pcm.length + bytesFor(1600));
+  stream.set(pcm, bytesFor(600));
+
+  const ws = new WebSocket(AUDIO_WS_URL);
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = (evt) => {
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch (e) { return; }
+    handleVoiceMessage(msg);
+    if (msg.type === 'reply_done' || msg.type === 'error') {
+      ws.close();
+      endSamplePlayback();
+    }
+  };
+  ws.onerror = () => { setStatus('連不上後端 /ws/audio', null); endSamplePlayback(); };
+
+  const opened = await new Promise((res) => {
+    ws.onopen = () => res(true);
+    setTimeout(() => res(false), 4000);
+  });
+  if (!opened) {
+    console.error('[sample] /ws/audio 連線逾時，後端有開嗎？');
+    setStatus('連不上後端', null);
+    try { ws.close(); } catch (e) {}
+    endSamplePlayback();
+    return;
+  }
+
+  let idx = 0;
+  const timer = setInterval(() => {
+    if (ws.readyState !== WebSocket.OPEN) { clearInterval(timer); return; }
+    const end = Math.min(idx + chunkBytes, stream.length);
+    ws.send(stream.slice(idx, end).buffer);
+    idx = end;
+    if (idx >= stream.length) clearInterval(timer);
+  }, PCM_CHUNK_MS);
+}
+
+sampleBtn.addEventListener('click', playSample);
 </script>
 </body>
 </html>

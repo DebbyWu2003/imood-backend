@@ -213,13 +213,20 @@ class TranscribeResult:
     audio_ms: float
 
 
+# Whisper 對中文會隨機吐繁體或簡體；產品是台灣的陪伴型 app，用 initial_prompt
+# 把輸出風格往繁體 / 台灣口語拉（不保證 100%，但明顯偏繁體）。
+DEFAULT_ZH_PROMPT = "以下是台灣人的日常對話，請以繁體中文輸出。"
+
+
 class Transcriber:
     def __init__(self, model_size: str = "small", device: str = "cpu",
-                 compute_type: str = "int8", language: str = "zh"):
+                 compute_type: str = "int8", language: str = "zh",
+                 initial_prompt: str = DEFAULT_ZH_PROMPT):
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
         self.language = language
+        self.initial_prompt = initial_prompt or None
         self._model = None
 
     def load(self) -> None:
@@ -246,6 +253,7 @@ class Transcriber:
             language=self.language,
             beam_size=5,
             vad_filter=False,  # 已經自己斷句，Silero 只是多花時間
+            initial_prompt=self.initial_prompt,
         )
         text = "".join(s.text for s in segments).strip()
         return TranscribeResult(
