@@ -41,6 +41,12 @@ PCM_SAMPLE_WIDTH_BYTES = 2  # 16-bit
 
 ASR_MODEL_SIZE = "small"  # 選型見 docs/asr-41-results.md
 
+# transcript 之後暫緩丟 LLM，再等這麼久的靜音看使用者有沒有續句（念頭中間
+# 停頓 > Endpointer 的 end_silence_ms 會被切成兩段，這裡把兩段 transcript
+# 併起來一起丟 LLM）。0 = 關閉（辨識完立刻回覆）。見 docs/asr-42-vad-plan.md。
+VOICE_COALESCE_MS = 1000
+VOICE_COALESCE_MAX_SEGMENTS = 6  # 安全上限：最多併這麼多段就強制送出
+
 SYSTEM_PROMPT = (
     "你是 imood，一個溫暖、有同理心的陪伴型虛擬人。"
     "請一律使用繁體中文回覆，語氣自然、簡短，避免長篇說教。"
@@ -217,14 +223,16 @@ async def audio_stream(websocket: WebSocket):
       {"type":"ack",       "ack":N, "chunk_ms":.., "total_bytes":..}   每個 chunk
       {"type":"asr_start", "audio_ms":..}                              偵測到句尾、開始辨識
       {"type":"asr_empty"}                                             有聲音但辨識不出內容
-      {"type":"transcript","text":.., "audio_ms":.., "asr_latency_ms":..} 一句話辨識完
+      {"type":"transcript","text":.., "audio_ms":.., "asr_latency_ms":..} 一段語音辨識完
       {"type":"reply_delta","delta":".."}                              LLM 回覆逐段
       {"type":"reply_done", "latency_ms":N}                            LLM 回覆結束
       {"type":"error",     "error":".."}
 
-    流程：chunk → Endpointer 累積 → 句尾靜音 → faster-whisper 辨識 → transcript
-    → llm_stream() → 逐段 reply_delta → reply_done。辨識 / 生成期間主迴圈不讀
-    socket，使用者這時通常在聽不會講話，累積的（靜音）chunk 之後補收即可。
+    流程：chunk → Endpointer 累積 → 句尾靜音 → faster-whisper 辨識 → transcript。
+    辨識後**不馬上**丟 LLM，先放進 pending、再等 VOICE_COALESCE_MS 的靜音——
+    使用者若在念頭中間停頓（>end_silence_ms 會被切成兩段），這段等待會把後面
+    的續句 transcript 併進來，一起丟 LLM，避免「一個念頭 → 回兩次」。
+    真的停下來（沒有續句）才 flush pending → llm_stream() → reply_delta → reply_done。
     """
     await websocket.accept()
 
@@ -233,65 +241,98 @@ async def audio_stream(websocket: WebSocket):
     chunk_count = 0
     byte_count = 0
     start = time.time()
+
+    pending: list = []  # 已辨識、還在等可能續句、還沒丟 LLM 的 transcript 片段
+
+    async def flush_pending() -> None:
+        nonlocal pending
+        if not pending:
+            return
+        text = "".join(pending).strip()
+        pending = []
+        if not text:
+            return
+        if llm is None:
+            await websocket.send_json({"type": "error", "error": "LLM 模型尚未載入完成"})
+            return
+        print(f"[voice] -> LLM ({len(text)} 字): {text!r}", flush=True)
+        async with _llm_lock:
+            await _stream_reply_to_ws(websocket, loop, text)
+
     try:
         while True:
-            data = await websocket.receive_bytes()
-            if len(data) % PCM_SAMPLE_WIDTH_BYTES != 0:
-                await websocket.send_json({
-                    "type": "error",
-                    "error": f"chunk 長度 {len(data)} bytes 不是 16-bit PCM 的整數倍",
-                })
-                continue
+            # pending 時用短 timeout 收，好讓「續句等待窗到期」能定期檢查
+            if pending:
+                try:
+                    data = await asyncio.wait_for(websocket.receive_bytes(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    data = None
+            else:
+                data = await websocket.receive_bytes()
 
-            chunk_count += 1
-            byte_count += len(data)
-            n_samples = len(data) // PCM_SAMPLE_WIDTH_BYTES
-            chunk_ms = n_samples / PCM_SAMPLE_RATE * 1000
+            if data is not None:
+                if len(data) % PCM_SAMPLE_WIDTH_BYTES != 0:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": f"chunk 長度 {len(data)} bytes 不是 16-bit PCM 的整數倍",
+                    })
+                else:
+                    chunk_count += 1
+                    byte_count += len(data)
+                    n_samples = len(data) // PCM_SAMPLE_WIDTH_BYTES
+                    chunk_ms = n_samples / PCM_SAMPLE_RATE * 1000
+                    await websocket.send_json({
+                        "type": "ack",
+                        "ack": chunk_count,
+                        "chunk_ms": round(chunk_ms, 1),
+                        "total_bytes": byte_count,
+                    })
 
-            await websocket.send_json({
-                "type": "ack",
-                "ack": chunk_count,
-                "chunk_ms": round(chunk_ms, 1),
-                "total_bytes": byte_count,
-            })
+                    utterance = endpointer.feed(data)
+                    if utterance is not None:
+                        if transcriber is None or not transcriber.ready:
+                            await websocket.send_json({"type": "error", "error": "ASR 模型尚未載入完成"})
+                        else:
+                            await websocket.send_json(
+                                {"type": "asr_start", "audio_ms": round(utterance.duration_ms)}
+                            )
+                            async with _asr_lock:
+                                result = await loop.run_in_executor(
+                                    None, transcriber.transcribe, utterance.pcm
+                                )
+                            print(
+                                f"[voice] utterance {utterance.duration_ms:.0f}ms "
+                                f"(voiced {utterance.voiced_ms:.0f}ms) -> ASR {result.latency_ms}ms "
+                                f"RTF {result.latency_ms / max(result.audio_ms, 1):.2f}x: {result.text!r}",
+                                flush=True,
+                            )
+                            if not result.text:
+                                await websocket.send_json({"type": "asr_empty"})
+                            else:
+                                await websocket.send_json({
+                                    "type": "transcript",
+                                    "text": result.text,
+                                    "audio_ms": round(utterance.duration_ms),
+                                    "asr_latency_ms": result.latency_ms,
+                                })
+                                if VOICE_COALESCE_MS <= 0:
+                                    if llm is None:
+                                        await websocket.send_json(
+                                            {"type": "error", "error": "LLM 模型尚未載入完成"}
+                                        )
+                                    else:
+                                        async with _llm_lock:
+                                            await _stream_reply_to_ws(websocket, loop, result.text)
+                                else:
+                                    pending.append(result.text)
+                                    if len(pending) >= VOICE_COALESCE_MAX_SEGMENTS:
+                                        await flush_pending()
 
-            utterance = endpointer.feed(data)
-            if utterance is None:
-                continue
-
-            if transcriber is None or not transcriber.ready:
-                await websocket.send_json({"type": "error", "error": "ASR 模型尚未載入完成"})
-                continue
-
-            # 讓前端知道「已偵測到句尾靜音、開始辨識」，避免使用者以為沒反應
-            await websocket.send_json({"type": "asr_start", "audio_ms": round(utterance.duration_ms)})
-
-            async with _asr_lock:
-                result = await loop.run_in_executor(
-                    None, transcriber.transcribe, utterance.pcm
-                )
-            print(
-                f"[voice] utterance {utterance.duration_ms:.0f}ms "
-                f"(voiced {utterance.voiced_ms:.0f}ms) -> ASR {result.latency_ms}ms "
-                f"RTF {result.latency_ms / max(result.audio_ms, 1):.2f}x: {result.text!r}",
-                flush=True,
-            )
-            if not result.text:
-                await websocket.send_json({"type": "asr_empty"})
-                continue
-
-            await websocket.send_json({
-                "type": "transcript",
-                "text": result.text,
-                "audio_ms": round(utterance.duration_ms),
-                "asr_latency_ms": result.latency_ms,
-            })
-
-            if llm is None:
-                await websocket.send_json({"type": "error", "error": "LLM 模型尚未載入完成"})
-                continue
-            async with _llm_lock:
-                await _stream_reply_to_ws(websocket, loop, result.text)
+            # 續句等待窗：上一段之後累積了夠久的靜音、且現在沒在講話 → 併起來丟 LLM
+            if (pending
+                    and not endpointer.triggered
+                    and endpointer.silence_since_last_ms >= VOICE_COALESCE_MS):
+                await flush_pending()
     except WebSocketDisconnect:
         elapsed = time.time() - start
         print(

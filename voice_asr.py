@@ -78,6 +78,7 @@ class Endpointer:
         self._triggered = False
         self._silence_ms = 0.0
         self._voiced_ms = 0.0
+        self._idle_silence_ms = 0.0     # 上一句 emit 之後、還沒開始下一句的靜音長度
 
         self._calib = bytearray()
         self._noise_floor: Optional[float] = None
@@ -126,6 +127,7 @@ class Endpointer:
         self._triggered = False
         self._silence_ms = 0.0
         self._voiced_ms = 0.0
+        self._idle_silence_ms = 0.0  # 開始數這一句之後的靜音（給續句合併判斷用）
 
         if voiced_ms < self.cfg.min_utterance_ms:
             logger.info("utterance discarded: only %.0fms voiced (< %d)",
@@ -135,6 +137,16 @@ class Endpointer:
                          voiced_ms=voiced_ms, trailing_silence_ms=trailing)
 
     # -- 對外 --------------------------------------------------
+
+    @property
+    def triggered(self) -> bool:
+        """目前是否在一句話的中間（已偵測到語音、還沒到句尾靜音）。"""
+        return self._triggered
+
+    @property
+    def silence_since_last_ms(self) -> float:
+        """上一句結束後累積了多久的靜音（還沒開始下一句時才有意義）。"""
+        return self._idle_silence_ms
 
     def feed(self, chunk: bytes) -> Optional[Utterance]:
         if not self._calibrated():
@@ -160,6 +172,9 @@ class Endpointer:
                     self._triggered = True
                     self._voiced_ms = self.cfg.frame_ms
                     self._silence_ms = 0.0
+                    self._idle_silence_ms = 0.0
+                else:
+                    self._idle_silence_ms += self.cfg.frame_ms
                 continue
 
             # 已觸發

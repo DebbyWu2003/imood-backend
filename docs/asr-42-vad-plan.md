@@ -77,9 +77,11 @@
 > **2026-08-29 首輪量測（FLEURS 真人朗讀，見第 7 節）**：700ms 對「朗讀長句」
 > 偏短——15 句切了 8 句。調到 **900ms** 後降到 5 句、端到端只多 ~300ms
 > （見第 7 節對照表），已把 `EndpointConfig.end_silence_ms` 預設改成 900。
-> casual 短句不受影響；長情緒傾訴仍可能被切（>900ms 停頓），真人對話語音
-> 再確認要不要更長或加「短暫等待可能的續句」機制。切段 = 「一個念頭 → LLM
-> 回兩次」，體驗不好。
+>
+> **切段沒被 900ms 完全解決 → 另外做了「續句合併」（第 8 節）**：被切成兩段
+> 時，把兩段的 transcript 併起來只丟一次 LLM，不會「一個念頭回兩次」。所以
+> `end_silence_ms` 現在不必為了防切段而調很長；反而之後可以考慮**調回短一點**
+> （如 600–700ms）讓 transcript 更快出現，切段交給續句合併處理。
 
 ---
 
@@ -157,8 +159,8 @@ JoyGen 不吃這條 PCM（見第 1 節），所以不用 tee、不用擔心兩�
   - 抽共用 helper `_build_messages` / `llm_complete` / `llm_stream`，
     `/api/chat`、`/api/chat/stream`、`/ws/audio` 共用（4.3）。
   - `/ws/audio`：per-connection `Endpointer`，斷句 → thread pool 辨識
-    （`_asr_lock`）→ `transcript` → `llm_stream()` 逐段 `reply_delta` → `reply_done`
-    （`_llm_lock`，同步 generator 用 thread+queue 橋接）。
+    （`_asr_lock`）→ `transcript` → **續句合併等待窗（見第 8 節）** → `llm_stream()`
+    逐段 `reply_delta` → `reply_done`（`_llm_lock`，同步 generator 用 thread+queue 橋接）。
   - 訊息協定（都有 `type`）：`ack` / `asr_start` / `asr_empty` / `transcript` /
     `reply_delta` / `reply_done` / `error`。舊 `# TODO forward to JoyGen` 已移除。
 - **`demo-imood-dashboard.html`**（4.4）：WS `onmessage` → `handleVoiceMessage()`
@@ -231,3 +233,43 @@ faster-whisper `small` / CPU / int8，Qwen2.5-1.5B / CPU。
 - 真人**對話**語音（有自然停頓、口語、語助詞、噪音）——FLEURS 朗讀代替不了。
 - VAD 參數依真人語音現場調（第 2.4 節），定案後填回。
 - 端到端量測目前是「送語料進 WS」，沒有含前端 render / 瀏覽器那段（很小）。
+
+---
+
+## 8. 續句合併（coalesce，2026-08-29 實作）
+
+**問題**：`end_silence_ms` 抓多長都是取捨——短了切斷思考停頓、長了短回覆變遲鈍。
+900ms 之後 FLEURS 還是切了 5/15。
+
+**做法**：把「判定句尾」和「觸發 LLM」拆開。
+
+```
+chunk → Endpointer → 句尾靜音(end_silence_ms=900) → 辨識 → transcript（馬上送前端）
+                                                          ↓
+                                          放進 pending，先不丟 LLM
+                                                          ↓
+              再等 VOICE_COALESCE_MS(1000ms) 的靜音（audio-time，用
+              Endpointer.silence_since_last_ms 算，不是 wall-clock）
+                                    ↓                        ↓
+                 這段內又來一句 → append 進 pending      靜音夠久且沒在講話
+                 （續句，deadline 重置）                      ↓
+                                                  "".join(pending) 一起丟 llm_stream()
+```
+
+- 停頓 **900–1900ms**（= end_silence + coalesce）→ 被 VAD 切成兩段，但續句合併
+  把兩段 transcript 併起來、只回一次。
+- 停頓 **> 1900ms** → 兩段各自回（真的是兩個回合）。
+- 停頓 **< 900ms** → 根本不會被切（一句）。
+- 代價：單一句子（沒有續句）現在也要等滿 1900ms 靜音才開始回覆
+  （比原本多 ~1s）。之後可加「transcript 以 。！？ 結尾且夠長 → 跳過等待直接
+  回覆」的啟發式來省掉常見情況的這 1s。
+
+**參數**（`server.py`）：`VOICE_COALESCE_MS = 1000`（0 = 關閉），
+`VOICE_COALESCE_MAX_SEGMENTS = 6`（安全上限）。
+**前端**：`transcript` 進來只加 user 訊息、不建 avatar 泡泡；泡泡等第一個
+`reply_delta` 才建（所以多段 transcript → 一個 avatar 回覆泡泡）。
+
+**測試**：`scripts/test_coalesce.py` —— 把一句話從中間切開塞靜音，驗
+1.2s 停頓 → 2 transcript / 1 reply、3s 停頓 → 2 transcript / 2 reply。
+
+**還沒驗**：真人對話語音下 900+1000 這組數字合不合適、要不要加結尾標點啟發式。

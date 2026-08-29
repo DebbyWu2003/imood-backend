@@ -49,9 +49,11 @@ async def main() -> None:
     if any(not p.exists() for p in paths):
         sys.exit("缺 samples/tts/*.wav；先跑 scripts\\gen_tts_samples.py")
 
+    # 每句之間留夠長的靜音，超過 end_silence(900) + coalesce(1000) + 餘裕，
+    # 兩句才不會被續句合併算成一次回覆
     stream = silence(600)
     for i, p in enumerate(paths):
-        stream += read_pcm(p) + silence(1400)  # > end_silence_ms(900) + chunk 粒度
+        stream += read_pcm(p) + silence(2800)
 
     acks = 0
     transcripts = []

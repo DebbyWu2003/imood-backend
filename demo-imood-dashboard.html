@@ -682,16 +682,19 @@ function handleVoiceMessage(msg) {
     case 'transcript':
       appendMessage('user', msg.text);
       setEmotion(detectEmotion(msg.text));
-      avatarFrame.classList.add('speaking');
+      // avatar 回覆的泡泡等 reply_delta 才建：後端辨識完可能還在等使用者把
+      // 話講完（coalesce window），這段時間可能再來一個 transcript。
       voiceReplyFull = '';
-      voiceReplyBodyEl = appendMessage('avatar', '').querySelector('.body');
+      voiceReplyBodyEl = null;
       setStatus('回覆中…', 'busy');
       break;
 
     case 'reply_delta':
       if (!voiceReplyBodyEl) {
         avatarFrame.classList.add('speaking');
+        voiceReplyFull = '';
         voiceReplyBodyEl = appendMessage('avatar', '').querySelector('.body');
+        setStatus('回覆中…', 'busy');
       }
       voiceReplyFull += msg.delta;
       voiceReplyBodyEl.textContent = voiceReplyFull;
