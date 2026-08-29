@@ -28,8 +28,8 @@ from voice_asr import BYTES_PER_MS, SAMPLE_RATE, Endpointer, Transcriber  # noqa
 CHUNK_MS = 320
 CHUNK_BYTES = CHUNK_MS * BYTES_PER_MS
 DEFAULT_WAVS = ["samples/tts/01_HsiaoChen_p0.wav", "samples/tts/02_YunJhe_p0.wav"]
-GAP_MS = 1000       # 句子之間的靜音
-TAIL_MS = 900       # 最後一句後面的靜音（要 > end_silence_ms 才會 flush）
+GAP_MS = 1400       # 句子之間的靜音（要 > end_silence_ms 900 + chunk 粒度）
+TAIL_MS = 1400      # 最後一句後面的靜音
 LEAD_MS = 600       # 開頭墊一點靜音給校正用
 
 

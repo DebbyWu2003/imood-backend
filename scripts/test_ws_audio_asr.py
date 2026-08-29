@@ -51,7 +51,7 @@ async def main() -> None:
 
     stream = silence(600)
     for i, p in enumerate(paths):
-        stream += read_pcm(p) + silence(900 if i == len(paths) - 1 else 1000)
+        stream += read_pcm(p) + silence(1400)  # > end_silence_ms(900) + chunk 粒度
 
     acks = 0
     transcripts = []
