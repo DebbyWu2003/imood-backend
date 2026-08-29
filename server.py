@@ -17,7 +17,7 @@
 
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -28,6 +28,11 @@ import time
 MODEL_PATH = "./models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 N_CTX = 2048
 N_THREADS = 8  # 依機器 CPU 核心數調整
+
+# voice-only 輸入路徑：JoyGen/audio2motion 只吃 16kHz / 單聲道 / 16-bit PCM
+# （8/25 品靜回覆，見 docs/streaming-architecture-analysis.md 第 2 節）
+PCM_SAMPLE_RATE = 16000
+PCM_SAMPLE_WIDTH_BYTES = 2  # 16-bit
 
 SYSTEM_PROMPT = (
     "你是 imood，一個溫暖、有同理心的陪伴型虛擬人。"
@@ -131,6 +136,55 @@ def chat_stream(req: ChatRequest):
         yield f"data: {json.dumps({'done': True, 'latency_ms': latency_ms}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.websocket("/ws/audio")
+async def audio_stream(websocket: WebSocket):
+    """
+    Voice-only 輸入路徑的接收端。
+
+    前端麥克風經 AudioWorklet 即時 resample 成 16kHz / mono / 16-bit PCM，
+    每個 chunk（預設 320ms，對齊 JoyGen diffusion decoder 的 8-frame batch
+    @25fps）以 binary frame 送過來。
+
+    JoyGen audio2motion 目前還沒有可對接的 streaming endpoint（品靜那邊還
+    在實作，見 docs/streaming-architecture-analysis.md 第 3、6 節），所以
+    這裡先只做格式驗證＋log，把「JoyGen 人臉影片」那塊留白。等對方 endpoint
+    就緒後，把下面 `# TODO forward to JoyGen` 那行換成實際轉送邏輯即可，
+    前端這條路徑完全不用改。
+    """
+    await websocket.accept()
+    chunk_count = 0
+    byte_count = 0
+    start = time.time()
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            if len(data) % PCM_SAMPLE_WIDTH_BYTES != 0:
+                await websocket.send_json({
+                    "error": f"chunk 長度 {len(data)} bytes 不是 16-bit PCM 的整數倍",
+                })
+                continue
+
+            chunk_count += 1
+            byte_count += len(data)
+            n_samples = len(data) // PCM_SAMPLE_WIDTH_BYTES
+            chunk_ms = n_samples / PCM_SAMPLE_RATE * 1000
+
+            # TODO forward to JoyGen: 品靜的 audio2motion streaming endpoint
+            # 就緒後，把這個 chunk 的 raw PCM16 bytes（`data`）轉送過去。
+
+            await websocket.send_json({
+                "ack": chunk_count,
+                "chunk_ms": round(chunk_ms, 1),
+                "total_bytes": byte_count,
+            })
+    except WebSocketDisconnect:
+        elapsed = time.time() - start
+        print(
+            f"[voice] client disconnected: {chunk_count} chunks, "
+            f"{byte_count} bytes, {elapsed:.1f}s"
+        )
 
 
 @app.get("/health")

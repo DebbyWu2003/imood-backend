@@ -1,15 +1,18 @@
 # imood.ai — 前端 Streaming 架構整合分析
 
 負責人：映潔（語音模組 / 前端 portal）
-日期：2026-08-25（更新：已收到品靜對 JoyGen input/output side 的回覆）
-目的：盤點現有前端架構，並根據品靜（JoyGen）2026-08-25 的回覆，確認 input side
-streaming 格式與 output side 現況，規劃可平行推進的工作。
+日期：2026-08-26（更新：已取得品靜 `buffering_reserach_20260819.md` 全文，補上
+JoyGen 輸出端／輸入端的具體 buffering 方案與可行性結論）
+目的：盤點現有前端架構，並根據品靜（JoyGen）2026-08-25 的回覆與
+2026-08-19 的 buffering 研究文件，確認 input side streaming 格式與 output
+side 現況，規劃可平行推進的工作。
 
 ---
 
-## 0. 本次更新摘要（品靜回覆重點）
+## 0. 本次更新摘要
 
-> 完整問答見文末「附錄：品靜回覆原文」。
+> 8/25 品靜回覆問答見文末「附錄一：品靜回覆原文」。8/19 buffering 研究文件
+> 全文已補進 `docs/buffering_reserach_20260819.md`，重點結論見下。
 
 1. **JoyGen/audio2motion 本身沒有原生文字輸入路徑，只吃音訊**
    （16kHz、mono、16-bit PCM）。也就是說原本問的「voice-only 還是
@@ -23,11 +26,19 @@ streaming 格式與 output side 現況，規劃可平行推進的工作。
 3. 若走 voice-only：前端麥克風收音後，需 encode 成 **16kHz / 單聲道 /
    16-bit PCM** 再送出。
 4. **輸出端目前仍是離線模式**：跑完整段語音才產生一支 MP4，**尚未**接上
-   WebRTC 即時輸出。品靜表示「輸出端改成即時串流」技術上已確認可行，
-   但仍在實作中，還沒有時程。
-5. 品靜附上參考文件 `joygen-deployment-notes/docs/buffering_reserach_20260819.md`
-   （在 JoyGen repo 內，非本 repo）——建議之後跟品靜要一份，確認 buffering
-   策略是否會影響前端要不要做本地 jitter buffer。
+   WebRTC 即時輸出。**buffering 研究文件證實這是可行的、風險最低的一塊**：
+   現有程式碼已經有逐 batch（8 frame）的 frame generator，理論上不用動模型，
+   只要把結尾「寫完全部 PNG 才一次性 ffmpeg 轉檔」換成常駐 ffmpeg pipe
+   即可做到邊算邊送（細節見第 3 節）。
+5. **buffering 研究文件的核心結論（品靜 2026-08-19，已讀原始碼 `inference_audio2motion.py` / `inference_joygen.py`，逐行確認）**：
+   - 輸出端：**可行，風險最低**，不需動模型，只需重寫收尾邏輯。
+   - 輸入端（語音）：**有條件可行**，能否 sliding window 切塊餵給
+     audio2motion，取決於 VAE 模型是否依賴長距離上下文，**尚未驗證**，
+     需要本地實測才能拍板。
+   - 輸入端（文字）：**不建議直接支援**，需先過 streaming TTS 轉音訊
+     （跟品靜 8/25 的回覆一致）。
+   - 三段管線（audio2motion → edit-expression → joygen diffusion decoder）
+     目前靠寫檔＋CLI 參數交接，串接方式要重新設計，優先度排在最後。
 
 ---
 
@@ -94,32 +105,53 @@ streaming 格式與 output side 現況，規劃可平行推進的工作。
   - 這點需要主動再跟品靜或學長確認一次（見第 6 節 #1），因為會決定接下來
     程式碼寫在哪一個 repo。
 
-## 3. 輸出端現況：離線 MP4，WebRTC 尚未可用 → 本週 demo 必須有 fallback
+## 3. 輸出端現況：離線 MP4，但已有明確的 streaming 改法 → 本週 demo 仍先用 fallback
 
-這是這次同步最關鍵的新資訊：**JoyGen 現在還是「整段跑完才吐 MP4」**，
-`avatar-frame` 裡預留的 `attachRemoteStream(stream)` **暫時沒有東西可以接**。
+品靜 8/25 回覆時，輸出端**還是「整段跑完才吐 MP4」**，`avatar-frame` 裡預留的
+`attachRemoteStream(stream)` **暫時沒有東西可以接**。但 8/19 buffering
+研究文件已經把改法寫清楚，且判定「風險最低、可以先做」，跟前端規劃直接相關：
 
-對「本週先做一個簡單版 demo 給廠商看」這個目標的直接影響：
-
-- 如果照原計畫等 JoyGen 的 WebRTC track，demo 時程會被卡住（品靜說仍在
-  實作中、無時程）。
+- **現有程式碼已經是逐 batch（8 frame）yield 的 generator**
+  （`inference_joygen.py` 的 `data_generator()`），UNet decode 完馬上就有畫面，
+  卡住即時性的唯一地方是**結尾**：等全部 frame 都貼完、寫成 PNG，才一次性
+  呼叫 blocking 的 `ffmpeg image2 ...` 轉 MP4，事後還會把 PNG 全刪掉。
+- 品靜規劃的解法是**不改原檔**、另外複製一份 `joygen_stream.py`，把「decode →
+  貼回原圖」搬進迴圈裡即時做，並用**常駐 ffmpeg subprocess**（`-f rawvideo`
+  → `-c:v libx264 -tune zerolatency` → `-f mpegts udp://...` 或 fragmented
+  MP4）取代結尾的一次性轉檔，frame 一產生就寫進 pipe。
+- **這件事對本週 demo 的意義**：品靜這邊的規劃是先做這塊（風險低、能立刻
+  拿到延遲數據），不依賴輸入端是否已經 streaming 化。但**目前仍在實作中，
+  還沒有可以對接的 endpoint**，所以本週 demo 時程上還是不能指望這塊。
+- **音畫同步是新增的工作**，ffmpeg 不會自動處理：畫面（frame_index/fps）跟
+  音訊（sample_count/sample_rate）要換算成統一的 PTS 才能對齊，且因為畫面是
+  整批（8 張）產生、節奏不穩定，可能需要前端／中介層做一個小型 jitter
+  buffer 吸收落差——這點呼應第 5 節的 buffering 設計。
 - 建議這週 demo **維持目前的 SVG 假表情**當作 fallback（`detectEmotion()`
   + SVG path 動畫），這部分已經完成且不依賴 JoyGen 進度，可以先給廠商看
   「文字對話 + 表情反應」的整體體驗，不用等真人臉影片。
 - `attachRemoteStream()` / `<video id="avatar-video">` 的殼保留著，等 JoyGen
   真的有 WebRTC track（或至少能吐出一段一段的 MP4/PNG 序列做假 streaming）
   時直接插上去，前端這邊不用重寫。
-- 可以順便問品靜：在真正的 WebRTC track 做出來之前，**有沒有「跑完一小段
-  就吐一個短 MP4」的中間形態**可以先接，即使不是嚴格意義的即時，也比
-  等到完全體 WebRTC 更早能串起整條 pipeline 做端對端驗證。（新增到第 6 節）
+- **中間形態已有答案**：buffering 文件裡提到本地測試階段會先用
+  `ffplay udp://<ip>:<port>` 監聽 UDP/MPEG-TS 驗證管線，這代表在正式 WebRTC
+  track 做出來之前，**JoyGen 端可能會先有一個 UDP/MPEG-TS 的中間輸出**，
+  而不是直接跳到 WebRTC。前端如果想提早驗證，可以先確認能不能接這個
+  UDP/MPEG-TS 來源，而不是死等 WebRTC track（已更新到第 6、7 節）。
 
 ## 4. WebRTC 整合抽象化（三層）—— 現況：全部待 JoyGen 側就緒
 
 1. **Signaling 層**：SDP offer/answer 怎麼交換——WebSocket signaling、REST
    交換 SDP，還是 JoyGen 用現成的 SFU（如 aiortc / mediasoup / LiveKit）。
-   品靜的回覆沒有提到這塊，代表 JoyGen 側連 WebRTC 輸出都還沒做，signaling
-   方案更是完全未知。**這件事目前只能靠我方自己研究 + 寫 mock 驗證**，暫時
-   問不出答案（見第 6 節）。
+   品靜的回覆沒有提到這塊，buffering 文件裡目前規劃的輸出也是
+   **UDP/MPEG-TS（或 fragmented MP4），不是直接的 WebRTC track**，代表
+   JoyGen 側連 WebRTC 輸出都還沒做，signaling 方案更是完全未知。**這件事
+   目前只能靠我方自己研究 + 寫 mock 驗證**，暫時問不出答案（見第 6 節）。
+   另外要注意：buffering 文件明講「UDP/MPEG-TS bytes → 瀏覽器可播放格式」
+   中間還要接什麼元件（WebRTC gateway？MSE + websocket relay？）**屬於
+   Media Server 範疇，不在 JoyGen 端修改範圍內**——這代表就算 JoyGen 端把
+   frame-based streaming 做完，前端也不會直接拿到 WebRTC track，中間很可能
+   還需要我方或第三方架一個轉發/封裝層，這是本次更新後新增的架構風險
+   （已加進第 7 節待確認）。
 2. **Track 層**：
    - Outbound（前端→JoyGen）：若走 voice-only，`pc.addTrack(micStream.getAudioTracks()[0])`；
      若走 text2voice + TTS 在前端，則是把 TTS 產生的 PCM chunk 包成
@@ -131,66 +163,126 @@ streaming 格式與 output side 現況，規劃可平行推進的工作。
    做法。**JoyGen 輸出端連即時輸出都還沒做，這件事優先度更低**，先不用花
    時間研究。
 
-## 5. Buffering 相關設計
+## 5. Buffering 相關設計（已取得品靜研究文件，更新為具體結論）
 
 - LLM 端已改為 streaming token 輸出，前端逐字 append，這條路已經跟 JoyGen
   無關、可以獨立展示。
-- 品靜提供的參考文件 `joygen-deployment-notes/docs/buffering_reserach_20260819.md`
-  在 JoyGen repo 內，我方 repo 目前沒有這份檔案。**建議跟品靜要一份 copy
-  或連結**，確認：
-  - JoyGen 端音訊 buffering 的 chunk size / latency 預期值，反推前端 TTS
-    （若 TTS 放前端）要用多大的 chunk 送出比較合拍。
-  - 這份研究是否已經涵蓋「output 端要怎麼 buffer 才能做到即時 WebRTC」，
-    如果有，代表輸出端的技術路線已定，只是還沒寫完；如果只涵蓋 input 端，
-    代表輸出端 buffering 策略可能還要再等。
+- 品靜的參考文件 `buffering_reserach_20260819.md` 已補進 `docs/` 資料夾，
+  以下是跟前端規劃直接相關的結論：
+
+  | 管線位置 | 建議 buffering 單位 | 可行性 | 對前端的意義 |
+  |---|---|---|---|
+  | Audio-to-Latent Mapper（audio2motion） | bytes，固定長度 sliding window（暫定 1–2 秒 window，200–320ms 一個 chunk） | 有條件可行，待本地驗證邊界失真 | 若 TTS 放前端，送出的 PCM chunk 大小最好對齊 200–320ms、且是 25fps 的整數倍，才跟 JoyGen 端的 window 合拍 |
+  | Edit-Expression（3D 渲染） | frame（逐張） | **未讀原始碼，無法確認**，是目前最大的資訊缺口 | 這段若不能逐 frame 輸出，會卡住整條輸出端 streaming，即使 diffusion decoder 那段做完也沒用 |
+  | Diffusion Decoder（joygen 主體） | frame（batch=8） | **已確認可行**，程式碼裡已有 generator | 對應第 3 節，是目前唯一可以立刻動工的一段 |
+  | 最終輸出 | bytes（H.264/MP4 fragment 或 raw frame，走 UDP/MPEG-TS） | 目前不存在，需新建 | 前端不會直接拿到 WebRTC track，中間可能要架轉發層（見第 4 節） |
+
+- **Chunk size 對齊**：品靜文件確認 TTS/麥克風送出的音訊切塊大小要**對齊
+  視訊 fps**，這件事原本只知道格式是 16kHz/mono/16-bit PCM，現在多了一個
+  具體的節奏限制（200–320ms 一塊，對齊 25fps），前端做 `AudioWorklet`
+  downsample 時可以直接照這個粒度設計 buffer。
+- **Sliding window 是否可行，取決於 VAE 模型是否依賴長距離上下文**——品靜
+  文件明講這件事**沒有被驗證過**，不能假設可行也不能假設不可行，要本地
+  實測（用同一段音訊比較「整段 forward」vs「切段 forward」的 expression
+  係數差異）。這代表輸入端 streaming 的時程目前無法承諾，前端這邊不用等，
+  先照第 6 節清單獨立推進即可。
+- **輸出端才是目前技術路線已定的部分**：品靜文件回答了「這份研究是否已經
+  涵蓋 output 端 buffering」——**有涵蓋，而且判定風險最低、可以先做**（見
+  第 3 節）。所以原本擔心「輸出端策略可能還要再等」的疑慮可以放下，唯一
+  不確定的是實作時程，不是技術路線本身。
+- **三段管線目前靠寫檔＋CLI 參數交接**，即使個別段落都改成 streaming，
+  串接方式仍要重新設計（走記憶體物件或 local socket），品靜文件把這件事
+  排在最後優先順序，等輸入/輸出端各自的可行性確認後才會動工——這代表
+  前後端真正端到端串接（不是 mock）的時程，比輸出端本身完工還要更晚。
 
 ## 6. 已完成 / 可獨立推進（不需再等品靜回覆）
+
+> **2026-08-29 更新**：跟學長及組員開會後決定，先實作 **voice-only** 這條路
+> （text2voice / streaming TTS 選型暫緩，等 voice-only 這條路走通再說）；
+> JoyGen 輸出端維持 **UDP/MPEG-TS**。以下已把可獨立完成（不依賴品靜側
+> JoyGen 人臉影片實作）的部分做掉。
 
 - [x] `/api/chat` 改為 streaming（`/api/chat/stream`，SSE），前端逐字顯示，
       並保留非 streaming `/api/chat` 作為連線失敗時的備援。
 - [x] `avatar-frame` 加入 `<video>` 殼與 `attachRemoteStream()` / `detachRemoteStream()`
       對接點。
 - [x] 麥克風權限骨架（`getUserMedia` + 音量條 UI）。
-- [x] 確認音訊格式規格：16kHz / mono / 16-bit PCM（不是 Opus）。
-- [ ] **麥克風 resample 到 16kHz/mono/16-bit PCM**：現在可以直接動工，用
-      `AudioWorklet` 做 downsample，不用再等任何人回覆。
-- [ ] **調查中文 streaming TTS 選項**：這是本次同步後新增的必要子任務，
-      候選方向可先評估 Edge-TTS（免費但非本地、非嚴格 streaming）、
-      PaddleSpeech TTS streaming、CosyVoice、GPT-SoVITS 等，篩選標準是
-      「支援中文 + 能 chunk 輸出 PCM」。獨立於品靜的回覆即可先動工研究。
+- [x] 確認音訊格式規格：16kHz / mono / 16-bit PCM（不是 Opus），且切塊大小
+      要對齊視訊 fps（200–320ms、25fps 整數倍）。
+- [x] 取得 JoyGen buffering 研究文件全文，確認輸出端技術路線已定
+      （見第 3、5 節）。
+- [x] **麥克風 resample 到 16kHz/mono/16-bit PCM**：`demo-imood-dashboard.html`
+      的 `enableMic()` 已改成用 `AudioWorklet`（`pcm16-downsampler`，內嵌
+      Blob URL，不用額外檔案）即時把麥克風原生取樣率線性插值 downsample
+      成 16kHz PCM16，chunk 大小取 **320ms**（= JoyGen diffusion decoder
+      的 8-frame batch @25fps，對齊第 5 節表格），透過 WebSocket 送到後端
+      `/ws/audio`。
+- [x] **後端接收端**：`server.py` 新增 `/ws/audio`（WebSocket），驗證 chunk
+      是否為 16-bit PCM 整數倍、回傳 `{ack, chunk_ms, total_bytes}`，並在
+      程式碼裡標了明確的 `# TODO forward to JoyGen` 掛勾點——等品靜那邊
+      audio2motion 的 streaming endpoint 就緒，只要在這裡把 `data`
+      （raw PCM16 bytes）轉送過去即可，前端這條路徑不用改。已用本地
+      WebSocket client 測試過 320ms 合法 chunk（10240 bytes → ack 正確）
+      與長度非偶數的異常 chunk（正確回傳 error）。
+- [~] **調查中文 streaming TTS 選項**：因為決定先走 voice-only，這個子
+      任務暫緩，等 voice-only 端到端跑通、且確定要做 text2voice 時再撿回來
+      （候選方向仍是 Edge-TTS / PaddleSpeech TTS streaming / CosyVoice /
+      GPT-SoVITS，篩選標準不變：支援中文＋能 chunk 輸出 PCM＋對齊 25fps）。
 - [ ] Signaling 方案研究（`aiortc` / 原生 `RTCPeerConnection`）：JoyGen 側
       目前無實際 endpoint 可對，只能先寫 mock track（例如本地一支測試影片
       模擬 remote stream）驗證前端 `pc.ontrack → attachRemoteStream()` 這條
       路徑邏輯是否正確，等 JoyGen 真的推出即時輸出時，只要換掉 mock 來源。
+      **仍待做**：目前 `/ws/audio` 是先用 WebSocket 收 PCM，不是走
+      `RTCPeerConnection.addTrack()`，這塊 signaling 研究決定的是之後要不要
+      換成真正的 WebRTC track。
+- [ ] **研究 UDP/MPEG-TS → 瀏覽器可播放格式的轉發層**：buffering 文件明講
+      這塊「不在 JoyGen 端修改範圍內」，代表是我方（或需要另外協調的第三方）
+      要處理的缺口。可以先研究 `ffplay` 本機驗證管線的方式能不能延伸成
+      「MSE + websocket relay」這類前端可用的形態，這件事也不依賴 JoyGen
+      輸入端進度，可以獨立先做技術驗證。**這塊仍在等品靜側 JoyGen 人臉
+      影片輸出端實作完成才能真正對接**，本次先不動工，avatar-frame 的
+      `<video>` 殼與 `attachRemoteStream()` 介面維持不變、隨時可插上。
 
 ## 7. 需再跟品靜 / 學長確認的項目（更新版）
 
 1. **TTS 放前端還是併入 Moshi（或取代 Moshi 的中文語音模型）？**
    → 決定 `server.py` 未來要不要保留、以及 TTS 相關程式碼要寫在哪個 repo。
-   （這是本次回覆後最需要優先釐清的架構分工問題。）
-2. **能否先要一份 `joygen-deployment-notes/docs/buffering_reserach_20260819.md`？**
-   → 確認 chunk size / latency 預期，設計前端 TTS 送出節奏。
+   （這是目前最需要優先釐清的架構分工問題，buffering 文件沒有回答這個。）
+2. ~~能否先要一份 `buffering_reserach_20260819.md`？~~ **已取得，本次更新已
+   整合進第 3、5 節。**
 3. **在完整 WebRTC 即時輸出做好之前，有沒有「短片段 MP4/PNG 序列」的中間
-   形態可以先接？** → 決定本週 demo 是否能提早做一次端對端串接驗證（哪怕
-   不是嚴格即時），而不是完全等到 JoyGen WebRTC 完工。
+   形態可以先接？** → buffering 文件顯示品靜本地測試會先用 UDP/MPEG-TS
+   （`ffplay` 監聽），這代表「中間形態」很可能就是 UDP/MPEG-TS，需要跟品靜
+   確認：這個 UDP/MPEG-TS 輸出何時能有一個測試用的 endpoint 給前端接，
+   以及前端能不能先拿一段錄好的 UDP/MPEG-TS 樣本做轉發層驗證。
 4. **JoyGen 側對 signaling／SFU 的規劃（aiortc/mediasoup/LiveKit 或自建）？**
-   → 品靜回覆未提及，可能代表尚未決定；若尚未決定，可以主動提議由我方
-   先評估方案，減少 JoyGen 端負擔。
+   → buffering 文件確認「UDP/MPEG-TS → 瀏覽器可播放格式」這段**不在
+   JoyGen 端範圍**，等於明確了這是我方或另一個角色的工作，需要主動確認
+   由誰負責，而不是等 JoyGen 端生出方案。
 5. **中文 streaming TTS 有沒有指定/偏好的引擎？** → 避免我方研究和 Moshi
    那邊（若 TTS 放在那）重工。
+6. **`inference_edit_expression.py`（Edit-Expression／3D 渲染段）能不能逐
+   frame 輸出？** → buffering 文件標注「未讀原始碼，無法確認」，是目前
+   最大的資訊缺口，這段若卡住，輸出端 streaming 即使 diffusion decoder
+   做完也接不起來，建議請品靜這邊優先排讀這段原始碼。
+7. **VAEModel sliding window 本地實測結果／時程？** → 決定輸入端語音
+   streaming 到底能不能做，以及前端 TTS/麥克風 chunk 送出節奏要不要因此
+   調整。
 
 ## 8. 下一步
 
-1. 立即動工（不用等回覆）：麥克風 resample 邏輯 + 中文 streaming TTS 選型調查。
-2. 主動追問品靜 / 學長：TTS 分工位置（前端 vs Moshi）、buffering 研究文件、
-   是否有中間輸出形態可先串。
+1. 立即動工（不用等回覆）：麥克風 resample 邏輯（照 200–320ms chunk 設計）、
+   中文 streaming TTS 選型調查、UDP/MPEG-TS 轉發層技術驗證。
+2. 主動追問品靜 / 學長：TTS 分工位置（前端 vs Moshi）、UDP/MPEG-TS 中間
+   輸出何時能給測試 endpoint、`edit_expression` 段是否能逐 frame 輸出、
+   sliding window 實測時程。
 3. 本週 demo 先以「文字輸入 + LLM streaming 回覆 + SVG 假表情」為主
    （已完成、不依賴 JoyGen），JoyGen 真人臉部分等有可用輸出（即使是短片段）
    時再插上去，不讓 demo 時程被 JoyGen 輸出端進度卡住。
 
 ---
 
-## 附錄：品靜回覆原文（2026-08-25）
+## 附錄一：品靜回覆原文（2026-08-25）
 
 > Q1 ～ Q3 — Input 是 voice-only 還是 text2voice？
 > 目前 JoyGen/audio2motion 本身只接受音訊輸入（16kHz、mono、16-bit PCM），
@@ -205,5 +297,24 @@ streaming 格式與 output side 現況，規劃可平行推進的工作。
 > 研究已確認輸出端改成即時串流技術上可行（仍在實作中）
 >
 > 參考文件：joygen-deployment-notes/docs/buffering_reserach_20260819.md
-</content>
-</invoke>
+
+## 附錄二：buffering 研究文件重點摘要（品靜，2026-08-19）
+
+> 全文見 `docs/buffering_reserach_20260819.md`。基於直接讀
+> `inference_audio2motion.py`、`inference_joygen.py` 原始碼得到的結論
+> （逐行讀過）；`inference_edit_expression.py` 尚未逐行讀，標記為未確認。
+
+- **輸出端（video streaming）**：可行，風險最低。現有程式碼已有逐 batch
+  的 frame generator，只需接上即時編碼/傳輸，不需動模型本身。
+- **輸入端（語音）**：有條件可行。能否用 sliding window 分塊餵給
+  audio2motion，取決於 VAE 模型是否依賴長距離上下文，目前沒有被驗證過，
+  需要本地實測才能拍板。
+- **輸入端（文字）**：不直接支援。JoyGen 只吃音訊特徵，文字需先經
+  streaming TTS 轉成音訊，格式須是 16kHz、單聲道、16-bit PCM，且切塊對齊
+  視訊 fps。
+- **建議執行順序**：先做風險低、能立刻拿到數據的輸出端（frame-based
+  streaming + 時間量測），再做風險較高的輸入端（audio2motion chunked
+  inference 實測）；`inference_edit_expression.py` 能否逐 frame 輸出待讀
+  原始碼確認；frame／audio 的 timestamp 同步機制待設計；UDP/MPEG-TS →
+  瀏覽器可播放格式的轉發元件待對齊（不在 JoyGen 端範圍）；三段管線的
+  串接方式最後再重新設計，避免白工。

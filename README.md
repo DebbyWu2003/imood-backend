@@ -25,11 +25,23 @@ uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 後端跑在別台機器或別的 port，記得把 HTML 裡的 `CHAT_STREAM_URL` /
 `CHAT_API_URL` 改掉。
 
-## 麥克風骨架
-Sidebar 有個「🎤 啟用麥克風」按鈕，目前只會呼叫 `getUserMedia()` 並畫
-音量條，**不會**送出任何 WebRTC track，純粹先驗證瀏覽器權限流程。等跟
-JoyGen 那邊對齊輸入格式（voice-only / text2voice、sample rate 等）後，
-再把 `enableMic()` 裡拿到的 `micStream` 接進 `RTCPeerConnection.addTrack()`。
+## 麥克風／voice-only 語音輸入
+（2026-08-29 更新：已與學長及組員開會決定先做 voice-only，text2voice 暫緩）
+
+Sidebar 的「🎤 啟用語音輸入（voice-only）」按鈕會：
+1. `getUserMedia()` 取得麥克風權限，畫音量條。
+2. 用 `AudioWorklet`（`pcm16-downsampler`）即時把麥克風原生取樣率
+   downsample 成 **16kHz / mono / 16-bit PCM**（JoyGen/audio2motion 要求
+   的格式），每 **320ms**（對齊 JoyGen diffusion decoder 的 8-frame batch
+   @25fps）packing 成一個 chunk。
+3. 透過 WebSocket 把每個 chunk 送到後端 `/ws/audio`（見 `server.py`）。
+
+後端目前只會驗證格式、回 ack，**還沒有真的轉送給 JoyGen**——JoyGen 側的
+audio2motion streaming endpoint 還在品靜那邊實作中，`server.py` 裡的
+`/ws/audio` 已經留了 `# TODO forward to JoyGen` 的掛勾點，之後串接時只要
+補上轉送邏輯，前端這條路徑不用改。JoyGen 人臉影片輸出（UDP/MPEG-TS）也是
+等品靜那邊實作完成才能對接，`avatar-frame` 的 `attachRemoteStream()` 介面
+先保留、暫不動工。
 
 ## JoyGen video track 對接點
 `avatar-frame` 裡已經放了一個預設 `display:none` 的 `<video id="avatar-video">`，

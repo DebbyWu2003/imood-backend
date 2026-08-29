@@ -322,10 +322,10 @@
         文字輸入 <span class="tag">啟用中</span>
       </div>
       <div class="mode-option" id="mic-option">
-        語音 / WebRTC <span class="tag" id="mic-tag">尚未啟用</span>
+        語音輸入（voice-only） <span class="tag" id="mic-tag">尚未啟用</span>
       </div>
     </div>
-    <button id="mic-btn" class="mic-btn">🎤 啟用麥克風（僅測試權限）</button>
+    <button id="mic-btn" class="mic-btn">🎤 啟用語音輸入（voice-only）</button>
     <div class="mic-meter" id="mic-meter"><div class="mic-meter-bar" id="mic-meter-bar"></div></div>
 
     <div class="sidebar-divider"></div>
@@ -558,16 +558,85 @@ textInput.addEventListener('keydown', e => {
 });
 
 // ============================================================
-// 麥克風權限骨架（僅測試 getUserMedia + 顯示音量，不送任何 WebRTC track）
+// Voice-only 輸入路徑
 //
-// 目的：先確認瀏覽器權限流程、音量偵測邏輯沒問題。等跟品靜對齊完
-// JoyGen 是 voice-only 還是 text2voice 之後，這裡的 micStream
-// 就是之後 pc.addTrack(micStream.getAudioTracks()[0]) 的來源。
+// 品靜 8/25 回覆確認 JoyGen/audio2motion 只吃音訊，格式是
+// 16kHz / 單聲道 / 16-bit PCM，且切塊大小要對齊視訊 fps。這裡用
+// AudioWorklet 把麥克風原生取樣率（通常 48kHz）即時 downsample 成
+// 16kHz PCM16，每 320ms（= JoyGen diffusion decoder 的 8-frame batch
+// @25fps）送一個 chunk，透過 WebSocket 傳給後端 /ws/audio。
+//
+// JoyGen 那邊的 streaming endpoint 還沒開放（見 server.py 的
+// `/ws/audio` 註解），所以目前後端只會回 ack，不會真的驅動臉部影片；
+// 等品靜那邊就緒，只要換後端轉送邏輯，前端這條路徑不用改。
 // ============================================================
+const AUDIO_WS_URL = 'ws://localhost:8000/ws/audio';
+const PCM_TARGET_SAMPLE_RATE = 16000;
+const PCM_CHUNK_MS = 320; // 對齊 JoyGen 8-frame batch @25fps
+
+// 用 Blob URL 內嵌 AudioWorkletProcessor，維持單一 HTML 檔、免額外檔案。
+const PCM_WORKLET_SOURCE = `
+class PCM16DownsamplerProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const { targetSampleRate, chunkMs } = options.processorOptions;
+    this.inputRate = sampleRate; // AudioWorkletGlobalScope 提供的 context 取樣率
+    this.step = this.inputRate / targetSampleRate;
+    this.chunkSamples = Math.round(targetSampleRate * chunkMs / 1000);
+    this.outBuffer = new Int16Array(this.chunkSamples);
+    this.outIndex = 0;
+    this.pos = 0; // 對輸入 channel 的浮點取樣位置（線性插值 downsample 用）
+  }
+
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    if (!channel || channel.length === 0) return true;
+
+    let pos = this.pos;
+    while (pos < channel.length) {
+      const idx = Math.floor(pos);
+      const frac = pos - idx;
+      const s0 = channel[idx] || 0;
+      const s1 = channel[idx + 1] !== undefined ? channel[idx + 1] : s0;
+      const sample = Math.max(-1, Math.min(1, s0 + (s1 - s0) * frac));
+      this.outBuffer[this.outIndex++] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+
+      if (this.outIndex >= this.chunkSamples) {
+        const chunk = this.outBuffer.slice(0);
+        this.port.postMessage(chunk.buffer, [chunk.buffer]);
+        this.outIndex = 0;
+      }
+      pos += this.step;
+    }
+    this.pos = pos - channel.length;
+    return true;
+  }
+}
+registerProcessor('pcm16-downsampler', PCM16DownsamplerProcessor);
+`;
+
 let micStream = null;
 let micAudioCtx = null;
 let micAnalyser = null;
+let micSourceNode = null;
+let micWorkletNode = null;
+let micSilentGain = null;
 let micRafId = null;
+let audioSocket = null;
+
+function connectAudioSocket() {
+  const socket = new WebSocket(AUDIO_WS_URL);
+  socket.binaryType = 'arraybuffer';
+  socket.onopen = () => console.log('[voice] /ws/audio 連線成功');
+  socket.onerror = (err) => console.error('[voice] /ws/audio 連線錯誤：', err);
+  socket.onclose = () => console.log('[voice] /ws/audio 連線關閉');
+  socket.onmessage = (evt) => {
+    // 目前後端只回 { ack, chunk_ms, total_bytes } 或 { error }，先印出來方便除錯。
+    const msg = JSON.parse(evt.data);
+    if (msg.error) console.warn('[voice] chunk 格式錯誤：', msg.error);
+  };
+  return socket;
+}
 
 async function enableMic() {
   try {
@@ -579,14 +648,44 @@ async function enableMic() {
   }
 
   micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const source = micAudioCtx.createMediaStreamSource(micStream);
+
+  // 音量條沿用原本的 analyser（跟 downsample pipeline 平行、互不影響）
+  micSourceNode = micAudioCtx.createMediaStreamSource(micStream);
   micAnalyser = micAudioCtx.createAnalyser();
   micAnalyser.fftSize = 256;
-  source.connect(micAnalyser);
+  micSourceNode.connect(micAnalyser);
 
-  micBtn.textContent = '⏹ 停止麥克風';
+  try {
+    const workletBlob = new Blob([PCM_WORKLET_SOURCE], { type: 'application/javascript' });
+    const workletURL = URL.createObjectURL(workletBlob);
+    await micAudioCtx.audioWorklet.addModule(workletURL);
+    URL.revokeObjectURL(workletURL);
+
+    micWorkletNode = new AudioWorkletNode(micAudioCtx, 'pcm16-downsampler', {
+      processorOptions: { targetSampleRate: PCM_TARGET_SAMPLE_RATE, chunkMs: PCM_CHUNK_MS },
+    });
+    micSourceNode.connect(micWorkletNode);
+
+    // AudioWorkletNode 不接 destination 的話，部分瀏覽器會停止呼叫 process()，
+    // 所以接一個音量為 0 的 GainNode 當終點，避免真的有聲音跑到喇叭造成回授。
+    micSilentGain = micAudioCtx.createGain();
+    micSilentGain.gain.value = 0;
+    micWorkletNode.connect(micSilentGain);
+    micSilentGain.connect(micAudioCtx.destination);
+
+    audioSocket = connectAudioSocket();
+    micWorkletNode.port.onmessage = (evt) => {
+      if (audioSocket && audioSocket.readyState === WebSocket.OPEN) {
+        audioSocket.send(evt.data);
+      }
+    };
+  } catch (err) {
+    console.error('AudioWorklet 初始化失敗，voice-only pipeline 未啟用：', err);
+  }
+
+  micBtn.textContent = '⏹ 停止語音輸入';
   micBtn.classList.add('recording');
-  micTag.textContent = '已啟用（僅測試）';
+  micTag.textContent = 'voice-only 已啟用';
   micTag.classList.add('on');
 
   drawMicLevel();
@@ -602,14 +701,26 @@ function drawMicLevel() {
 
 function disableMic() {
   if (micRafId) cancelAnimationFrame(micRafId);
+  if (micWorkletNode) {
+    micWorkletNode.port.onmessage = null;
+    micWorkletNode.disconnect();
+  }
+  if (micSilentGain) micSilentGain.disconnect();
+  if (micSourceNode) micSourceNode.disconnect();
   if (micStream) micStream.getTracks().forEach(t => t.stop());
+  if (audioSocket) audioSocket.close();
   if (micAudioCtx) micAudioCtx.close();
+
   micStream = null;
   micAudioCtx = null;
   micAnalyser = null;
+  micSourceNode = null;
+  micWorkletNode = null;
+  micSilentGain = null;
+  audioSocket = null;
   micMeterBar.style.width = '0%';
 
-  micBtn.textContent = '🎤 啟用麥克風（僅測試權限）';
+  micBtn.textContent = '🎤 啟用語音輸入（voice-only）';
   micBtn.classList.remove('recording');
   micTag.textContent = '尚未啟用';
   micTag.classList.remove('on');
