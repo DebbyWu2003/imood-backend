@@ -201,6 +201,17 @@ side 現況，規劃可平行推進的工作。
 > （text2voice / streaming TTS 選型暫緩，等 voice-only 這條路走通再說）；
 > JoyGen 輸出端維持 **UDP/MPEG-TS**。以下已把可獨立完成（不依賴品靜側
 > JoyGen 人臉影片實作）的部分做掉。
+>
+> **2026-08-29 再更新（ASR 端到端跑通）**：voice-only 的 ASR 那段
+> （`docs/asr-todo.md` 第 4.1–4.4）已完成——「使用者講話 → VAD 斷句 →
+> faster-whisper 辨識 → Qwen 回覆 streaming → 前端逐字顯示 + 表情」整條在
+> 本機跑通，見下方新增項目與 `docs/asr-41-results.md`、`docs/asr-42-vad-plan.md`。
+> 只剩 4.5 真人語音測試 + 延遲量測。
+>
+> **JoyGen 音訊來源已確認（品靜，2026-08-29）**：JoyGen audio2motion 吃的是
+> **LLM 回覆經 TTS 合成的音訊**（讓 avatar 講出回覆），**不是**使用者輸入的
+> 麥克風 PCM。第 2 節那張「使用者 PCM → JoyGen」的圖是舊的。也就是說
+> `/ws/audio` 收到的麥克風 PCM 純 ASR 用，JoyGen 對接改到之後 TTS 那條路上。
 
 - [x] `/api/chat` 改為 streaming（`/api/chat/stream`，SSE），前端逐字顯示，
       並保留非 streaming `/api/chat` 作為連線失敗時的備援。
@@ -217,17 +228,36 @@ side 現況，規劃可平行推進的工作。
       成 16kHz PCM16，chunk 大小取 **320ms**（= JoyGen diffusion decoder
       的 8-frame batch @25fps，對齊第 5 節表格），透過 WebSocket 送到後端
       `/ws/audio`。
-- [x] **後端接收端**：`server.py` 新增 `/ws/audio`（WebSocket），驗證 chunk
-      是否為 16-bit PCM 整數倍、回傳 `{ack, chunk_ms, total_bytes}`，並在
-      程式碼裡標了明確的 `# TODO forward to JoyGen` 掛勾點——等品靜那邊
-      audio2motion 的 streaming endpoint 就緒，只要在這裡把 `data`
-      （raw PCM16 bytes）轉送過去即可，前端這條路徑不用改。已用本地
-      WebSocket client 測試過 320ms 合法 chunk（10240 bytes → ack 正確）
-      與長度非偶數的異常 chunk（正確回傳 error）。
+- [x] **後端接收端**：`server.py` 的 `/ws/audio`（WebSocket）驗證 chunk 格式、
+      回 `ack`。（原本的 `# TODO forward to JoyGen` 掛勾點已在 ASR 實作時
+      移除——見上方「JoyGen 音訊來源已確認」，那個掛勾點放錯位置。）
+- [x] **ASR 選型與環境驗證**（`docs/asr-todo.md` 4.1，見 `docs/asr-41-results.md`）：
+      桌機（Windows / CPU / int8）跑 **faster-whisper `small`**。口語對話 CER
+      1.6%、真人朗讀難詞域 CER 6.2%；一句辨識 RTF ~0.2–0.5x。`medium` 難詞域
+      較好但慢 2.5x，留作 fallback。
+- [x] **VAD 斷句 + buffer**（4.2，見 `docs/asr-42-vad-plan.md`）：`voice_asr.py`
+      的 `Endpointer`——webrtcvad(mode 2) + 自適應能量門檻，連續靜音 700ms
+      （起始值）判定句尾，整段丟 faster-whisper 辨識。buffer 純 ASR 用（不跟
+      JoyGen 共用）。
+- [x] **接上 LLM streaming**（4.3）：`/ws/audio` 辨識出文字後丟給
+      `llm_stream()`（跟 `/api/chat/stream` 共用 helper），逐段回
+      `reply_delta` → `reply_done`。所有 WS 訊息都有 `type` 欄位：
+      `ack` / `asr_start` / `asr_empty` / `transcript` / `reply_delta` /
+      `reply_done` / `error`。
+- [x] **前端串接**（4.4）：`demo-imood-dashboard.html` 的
+      `handleVoiceMessage()` 接上述訊息，transcript → user 訊息、reply_delta
+      逐字 append 進 avatar 訊息（跟打字模式共用 `appendMessage` / `setEmotion`），
+      頂端狀態膠囊顯示 聆聽中 / 辨識中… / 回覆中…。瀏覽器實測過。
+- [ ] **4.5 真人語音測試 + 延遲量測**（唯一還沒做的 ASR 項目）：真人講話測
+      斷句準度、量「講完 → 看到回覆」秒數、現場調 VAD 參數。遠端連線無法
+      當場錄音，用 podcast 片段或組員語音訊息（見 `docs/asr-41-results.md`
+      替代測試法）。
 - [~] **調查中文 streaming TTS 選項**：因為決定先走 voice-only，這個子
       任務暫緩，等 voice-only 端到端跑通、且確定要做 text2voice 時再撿回來
       （候選方向仍是 Edge-TTS / PaddleSpeech TTS streaming / CosyVoice /
       GPT-SoVITS，篩選標準不變：支援中文＋能 chunk 輸出 PCM＋對齊 25fps）。
+      註：edge-tts 已經拿來當 ASR 測試語音的產生器（`scripts/gen_tts_samples.py`），
+      不代表選它當產品 TTS。
 - [ ] Signaling 方案研究（`aiortc` / 原生 `RTCPeerConnection`）：JoyGen 側
       目前無實際 endpoint 可對，只能先寫 mock track（例如本地一支測試影片
       模擬 remote stream）驗證前端 `pc.ontrack → attachRemoteStream()` 這條
@@ -271,11 +301,18 @@ side 現況，規劃可平行推進的工作。
 
 ## 8. 下一步
 
-1. 立即動工（不用等回覆）：麥克風 resample 邏輯（照 200–320ms chunk 設計）、
-   中文 streaming TTS 選型調查、UDP/MPEG-TS 轉發層技術驗證。
+> **2026-08-29 更新**：麥克風 resample 已完成；voice-only 的 ASR→LLM→前端
+> 整條也跑通（第 6 節），只剩 4.5 真人語音測試。以下 1、2 的原內容多已完成
+> 或轉為等待狀態，保留當歷程紀錄。
+
+1. ~~立即動工：麥克風 resample、streaming TTS 選型調查、UDP/MPEG-TS 轉發層~~
+   → 麥克風 resample + voice-only ASR pipeline 已完成；streaming TTS 選型
+   因 voice-only 優先而暫緩；UDP/MPEG-TS 轉發層仍等 JoyGen 輸出端。
+   **現在的下一步**：ASR 4.5 真人語音測試 + 延遲量測（見第 6 節）。
 2. 主動追問品靜 / 學長：TTS 分工位置（前端 vs Moshi）、UDP/MPEG-TS 中間
    輸出何時能給測試 endpoint、`edit_expression` 段是否能逐 frame 輸出、
-   sliding window 實測時程。
+   sliding window 實測時程。（JoyGen 音訊來源已於 8/29 確認 = LLM 回覆的
+   TTS 音訊，見第 6 節。）
 3. 本週 demo 先以「文字輸入 + LLM streaming 回覆 + SVG 假表情」為主
    （已完成、不依賴 JoyGen），JoyGen 真人臉部分等有可用輸出（即使是短片段）
    時再插上去，不讓 demo 時程被 JoyGen 輸出端進度卡住。
