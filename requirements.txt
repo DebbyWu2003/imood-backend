@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 llama-cpp-python
 pydantic
+httpx  # /ws/audio 呼叫獨立的 tts_service.py 用（見 docs/tts-prototype-notes.md）
 
 # voice-only ASR（/ws/audio 的 VAD 斷句 + 語音辨識，見 docs/asr-42-vad-plan.md）
 faster-whisper==1.2.1

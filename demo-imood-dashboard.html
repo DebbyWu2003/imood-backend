@@ -660,6 +660,38 @@ let micSilentGain = null;
 let micRafId = null;
 let audioSocket = null;
 
+// TTS 回覆語音播放用（跟收音的 micAudioCtx 分開，互不干擾）。
+// ttsNextPlayTime 是排程游標：每個 audio_delta 到達的時間點會抖動（網路、
+// 合成速度不均），用這個游標依序接龍排程播放，才不會卡頓或疊音。
+let ttsAudioCtx = null;
+let ttsNextPlayTime = 0;
+
+function playAudioChunk(base64, sampleRate) {
+  if (!ttsAudioCtx) {
+    ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    ttsNextPlayTime = ttsAudioCtx.currentTime;
+  }
+
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const pcm16 = new Int16Array(bytes.buffer);
+
+  const float32 = new Float32Array(pcm16.length);
+  for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 32768;
+
+  const buffer = ttsAudioCtx.createBuffer(1, float32.length, sampleRate);
+  buffer.copyToChannel(float32, 0);
+
+  const source = ttsAudioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ttsAudioCtx.destination);
+
+  const startAt = Math.max(ttsAudioCtx.currentTime, ttsNextPlayTime);
+  source.start(startAt);
+  ttsNextPlayTime = startAt + buffer.duration;
+}
+
 function connectAudioSocket() {
   const socket = new WebSocket(AUDIO_WS_URL);
   socket.binaryType = 'arraybuffer';
@@ -679,7 +711,8 @@ let voiceReplyBodyEl = null;
 let voiceReplyFull = '';
 
 // /ws/audio 回傳訊息的處理。訊息型別見 server.py 的 audio_stream() docstring：
-//   ack / asr_start / transcript / reply_delta / reply_done / asr_empty / error
+//   ack / asr_start / transcript / reply_delta / reply_done / audio_delta /
+//   audio_done / asr_empty / error
 function handleVoiceMessage(msg) {
   switch (msg.type) {
     case 'ack':
@@ -724,6 +757,17 @@ function handleVoiceMessage(msg) {
       voiceReplyFull = '';
       avatarFrame.classList.remove('speaking');
       resetStatus();
+      break;
+
+    case 'audio_delta':
+      // 文字已經在 reply_delta/reply_done 顯示完了，語音是晚幾秒才到的
+      // 並行行為（見 docs/tts-prototype-notes.md 的取捨說明），不影響上面
+      // 的文字/表情邏輯。
+      playAudioChunk(msg.audio, msg.sample_rate);
+      break;
+
+    case 'audio_done':
+      // 目前不用特別處理，之後接 JoyGen 對嘴動畫可能會用到這個時間點。
       break;
 
     case 'error':

@@ -26,7 +26,10 @@ import asyncio
 import json
 import time
 
+import base64
+
 from voice_asr import Endpointer, Transcriber
+from tts_client import stream_tts
 
 MODEL_PATH = "./models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 N_CTX = 2048
@@ -46,6 +49,12 @@ ASR_MODEL_SIZE = "small"  # 選型見 docs/asr-41-results.md
 # 併起來一起丟 LLM）。0 = 關閉（辨識完立刻回覆）。見 docs/asr-42-vad-plan.md。
 VOICE_COALESCE_MS = 1000
 VOICE_COALESCE_MAX_SEGMENTS = 6  # 安全上限：最多併這麼多段就強制送出
+
+# 回覆語音（TTS）——獨立 process（tts_service.py，跑在另一個 conda env），
+# 見 docs/tts-prototype-notes.md。這裡連不上就優雅降級成純文字，不影響
+# 既有的 /ws/audio 文字回覆流程。
+TTS_ENABLED = True
+TTS_SERVICE_URL = "http://localhost:8001"
 
 SYSTEM_PROMPT = (
     "你是 imood，一個溫暖、有同理心的陪伴型虛擬人。"
@@ -194,6 +203,8 @@ async def _stream_reply_to_ws(websocket: WebSocket, loop, user_text: str) -> Non
 
     start = time.time()
     fut = loop.run_in_executor(None, produce)
+    full_text_parts: list = []
+    failed = False
     try:
         while True:
             item = await queue.get()
@@ -201,7 +212,9 @@ async def _stream_reply_to_ws(websocket: WebSocket, loop, user_text: str) -> Non
                 break
             if isinstance(item, Exception):
                 await websocket.send_json({"type": "error", "error": f"LLM 生成失敗: {item}"})
+                failed = True
                 break
+            full_text_parts.append(item)
             await websocket.send_json({"type": "reply_delta", "delta": item})
     finally:
         await fut
@@ -209,6 +222,35 @@ async def _stream_reply_to_ws(websocket: WebSocket, loop, user_text: str) -> Non
         "type": "reply_done",
         "latency_ms": int((time.time() - start) * 1000),
     })
+
+    if not failed and TTS_ENABLED:
+        await _stream_tts_to_ws(websocket, "".join(full_text_parts))
+
+
+async def _stream_tts_to_ws(websocket: WebSocket, text: str) -> None:
+    """
+    LLM 回覆全部生成完之後才合成語音（先求簡單能動，見
+    docs/tts-prototype-notes.md 的取捨說明；之後要更即時可以改成逐句合成）。
+    tts_service 連不上或出錯都不當作致命錯誤——文字回覆已經送完了，這裡
+    失敗只送一個 error 訊息，不能讓 /ws/audio 的主迴圈掛掉。
+    """
+    text = text.strip()
+    if not text:
+        return
+    seq = 0
+    try:
+        async for chunk in stream_tts(text, TTS_SERVICE_URL):
+            seq += 1
+            await websocket.send_json({
+                "type": "audio_delta",
+                "audio": base64.b64encode(chunk).decode("ascii"),
+                "sample_rate": PCM_SAMPLE_RATE,
+                "seq": seq,
+            })
+        await websocket.send_json({"type": "audio_done"})
+    except Exception as exc:  # noqa: BLE001 — TTS 失敗不影響已完成的文字回覆
+        print(f"[tts] 合成失敗，改為純文字回覆: {exc}", flush=True)
+        await websocket.send_json({"type": "error", "error": "語音合成暫時無法使用"})
 
 
 @app.websocket("/ws/audio")
