@@ -75,6 +75,29 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
   `paddlenlp==2.8.1` 又依賴一個根本不存在於公開 PyPI 的 `tool-helpers`。
   不是 Windows 特有問題，是上游套件生態目前失修，不建議再花時間修。
 
+## 實測後修過的兩個 bug（接進 /ws/audio 之後才發現）
+
+- **播放斷斷續續**：CosyVoice 在純 CPU 環境的合成速度遠慢於即時播放
+  （RTF 實測約 4 倍），一開始「邊合成、邊把收到的 chunk 排程播放」，播放
+  速度追過合成速度時就會沒有下一塊可接，聽起來斷斷續續。**修法**：前端
+  （`demo-imood-dashboard.html`）改成收滿整段 `audio_delta`、等
+  `audio_done` 才一次排程播放（見 `pendingAudioChunks`），犧牲一點「即時
+  感」換取播放連貫。這台機器上合成本來就跟不上即時播放，這個犧牲幾乎
+  沒有額外代價。
+- **繁體中文發音跑掉、聽起來不像中文**：imood 的 LLM 系統提示詞要求一律
+  用繁體中文回覆，但 CosyVoice-300M-SFT 的文字前處理主要是針對簡體中文
+  訓練的，字典裡沒有對應注音資料的繁體字會念出明顯不像中文的音。**修
+  法**：`tts_service.py` 在合成前用 `opencc`（`OpenCC('t2s')`）把文字轉
+  成簡體再送進 CosyVoice，前端顯示的文字不受影響（只有語音合成那一步
+  用簡體）。實測確認發音恢復正常。`opencc-python-reimplemented` 已加進
+  `cosyvoice` conda env（不在 `requirements.txt`，因為 `tts_service.py`
+  不跑在主 venv）。
+- **另一個純前端 bug（跟 CosyVoice 無關）**：「播放範例語音」按鈕的舊程式
+  碼在收到 `reply_done` 就關閉 WebSocket，但 TTS 是接在 `reply_done`
+  **之後**才送 `audio_delta`/`audio_done`，導致語音還沒送到連線就被切斷。
+  已改成等 `audio_done`/`error` 才關閉，並加 20 秒保險 timeout（避免
+  `TTS_ENABLED=False` 時卡住不結束）。
+
 ## 對應的程式碼
 
 - `tts_service.py`（imood-backend repo 根目錄，但用 `cosyvoice` conda env

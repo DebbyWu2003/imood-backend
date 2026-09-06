@@ -666,6 +666,12 @@ let audioSocket = null;
 let ttsAudioCtx = null;
 let ttsNextPlayTime = 0;
 
+// CosyVoice 在純 CPU 環境合成速度比即時播放慢很多（RTF 實測約 4 倍），
+// 邊合成邊播會播到一半沒有下一塊可接、聲音斷斷續續。改成收滿整段
+// audio_delta、等 audio_done 才一次排程播放，犧牲一點「即時感」換取
+// 播放連貫（見 docs/tts-prototype-notes.md）。
+let pendingAudioChunks = [];
+
 function playAudioChunk(base64, sampleRate) {
   if (!ttsAudioCtx) {
     ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -735,6 +741,7 @@ function handleVoiceMessage(msg) {
       // 話講完（coalesce window），這段時間可能再來一個 transcript。
       voiceReplyFull = '';
       voiceReplyBodyEl = null;
+      pendingAudioChunks = [];
       setStatus('回覆中…', 'busy');
       break;
 
@@ -760,14 +767,17 @@ function handleVoiceMessage(msg) {
       break;
 
     case 'audio_delta':
-      // 文字已經在 reply_delta/reply_done 顯示完了，語音是晚幾秒才到的
-      // 並行行為（見 docs/tts-prototype-notes.md 的取捨說明），不影響上面
-      // 的文字/表情邏輯。
-      playAudioChunk(msg.audio, msg.sample_rate);
+      // 先收著、不馬上播——見上面 pendingAudioChunks 宣告處的說明。
+      pendingAudioChunks.push(msg);
       break;
 
     case 'audio_done':
-      // 目前不用特別處理，之後接 JoyGen 對嘴動畫可能會用到這個時間點。
+      // 整段語音都到齊了，現在一次排程播放，chunk 之間不會有等待、
+      // 播放才會連貫。
+      for (const chunk of pendingAudioChunks) {
+        playAudioChunk(chunk.audio, chunk.sample_rate);
+      }
+      pendingAudioChunks = [];
       break;
 
     case 'error':
@@ -785,8 +795,11 @@ async function enableMic() {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
     console.error('取得麥克風權限失敗：', err);
-    micTag.textContent = '權限被拒絕';
-    setStatus('麥克風權限被拒', null);
+    // err.name 能分辨真正原因：NotAllowedError（網站或系統層級權限被拒）、
+    // NotFoundError（沒偵測到麥克風裝置）、SecurityError（不是安全情境，
+    // 例如用 file:// 打開）等，直接顯示出來比一律說「被拒絕」好排查。
+    micTag.textContent = `錯誤：${err.name}`;
+    setStatus(`麥克風權限失敗（${err.name}）`, null);
     return;
   }
 
@@ -948,16 +961,38 @@ async function playSample() {
 
   const ws = new WebSocket(AUDIO_WS_URL);
   ws.binaryType = 'arraybuffer';
+  let replyDoneAt = null;
+  // reply_done 之後 server 還會接著送 TTS 的 audio_delta/audio_done（見
+  // server.py 的 _stream_tts_to_ws），不能在 reply_done 就關掉連線，不然
+  // 語音還沒送到就被切斷了。改成等 audio_done/error，並加一個保險 timeout
+  // ——如果後端 TTS_ENABLED=False 或卡住，reply_done 之後不會再有任何
+  // 訊息，避免連線和 UI 卡住不會結束。
+  const FALLBACK_CLOSE_MS = 20000;
   ws.onmessage = (evt) => {
     let msg;
     try { msg = JSON.parse(evt.data); } catch (e) { return; }
     handleVoiceMessage(msg);
-    if (msg.type === 'reply_done' || msg.type === 'error') {
+    if (msg.type === 'reply_done') {
+      replyDoneAt = Date.now();
+    }
+    if (msg.type === 'audio_done' || msg.type === 'error') {
+      clearInterval(fallbackTimer);
       ws.close();
       endSamplePlayback();
     }
   };
-  ws.onerror = () => { setStatus('連不上後端 /ws/audio', null); endSamplePlayback(); };
+  const fallbackTimer = setInterval(() => {
+    if (replyDoneAt && Date.now() - replyDoneAt >= FALLBACK_CLOSE_MS) {
+      clearInterval(fallbackTimer);
+      ws.close();
+      endSamplePlayback();
+    }
+  }, 1000);
+  ws.onerror = () => {
+    clearInterval(fallbackTimer);
+    setStatus('連不上後端 /ws/audio', null);
+    endSamplePlayback();
+  };
 
   const opened = await new Promise((res) => {
     ws.onopen = () => res(true);

@@ -37,14 +37,21 @@ CHUNK_BYTES = int(TARGET_SAMPLE_RATE * (CHUNK_MS / 1000) * 2)  # 16-bit = 2 byte
 app = FastAPI(title="imood-backend TTS service (CosyVoice)")
 
 cosyvoice = None  # startup 時載入一次，避免每個請求都要重載模型
+_t2s = None  # 繁體轉簡體，見下方 load_model() 的說明
 
 
 @app.on_event("startup")
 def load_model():
-    global cosyvoice
+    global cosyvoice, _t2s
     from cosyvoice.cli.cosyvoice import AutoModel
+    from opencc import OpenCC
 
     cosyvoice = AutoModel(model_dir=MODEL_DIR)
+    # imood 的 LLM 系統提示詞要求一律回覆繁體中文，但 CosyVoice-300M-SFT
+    # 的文字前處理主要是針對簡體中文訓練的，餵繁體字進去時，字典裡沒有的
+    # 字會念出明顯不像中文的音。這裡只轉換「要合成的文字」，前端顯示的
+    # 文字不受影響，使用者看到的還是繁體。
+    _t2s = OpenCC("t2s")
 
 
 class SynthesizeRequest(BaseModel):
@@ -74,6 +81,7 @@ def _synthesize_chunks(text: str) -> Iterator[bytes]:
         orig_freq=cosyvoice.sample_rate, new_freq=TARGET_SAMPLE_RATE
     )
 
+    text = _t2s.convert(text)
     carry = b""  # 上一個 model chunk 切剩、不足 320ms 的尾巴
     for out in cosyvoice.inference_sft(text, SPEAKER, stream=True):
         pcm = carry + _pcm16_bytes(out["tts_speech"], resampler)
