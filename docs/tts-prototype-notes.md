@@ -45,6 +45,12 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
    <miniconda>\envs\cosyvoice\python.exe -m pip install --no-build-isolation "openai-whisper==20231117"
    <miniconda>\envs\cosyvoice\python.exe -m pip install -r requirements.txt   # 再跑一次，這次會跳過已裝好的 whisper
    ```
+   **CosyVoice 的 `requirements.txt` 沒列到但 `tts_service.py` 會用到**：
+   `opencc-python-reimplemented`（繁轉簡再送進 CosyVoice，見下方「已修過的
+   bug」段落），要另外裝：
+   ```
+   <miniconda>\envs\cosyvoice\python.exe -m pip install opencc-python-reimplemented==0.1.7
+   ```
 5. 下載預訓練模型（`iic/CosyVoice-300M-SFT`，內建中文女/男聲，不用額外
    參考音檔）：
    ```python
