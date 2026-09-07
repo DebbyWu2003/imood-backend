@@ -5,6 +5,10 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# 外部依賴，實體放在 repo 目錄底下方便管理，但不進版控（各有數 GB）
+CosyVoice/
+miniconda3/
+
 # ASR 測試語音（可用 scripts/gen_tts_samples.py 或 scripts/record_wav.py 重生）
 samples/
 *.wav

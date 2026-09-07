@@ -18,7 +18,7 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
 
 ## 環境建置步驟（實際跑過、成功的版本）
 
-1. **Miniconda**：裝到 `C:\pianoplayer\miniconda3`（**不要**裝在使用者
+1. **Miniconda**：裝到 `C:\imood-backend\miniconda3`（**不要**裝在使用者
    家目錄底下，這台機器的使用者名稱含中文字元，Miniconda 的 NSIS 安裝程式
    對非 ASCII 路徑會直接安裝失敗，退而求其次選一個全英數字路徑）。
 2. 建立 conda 環境：
@@ -26,11 +26,11 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
    conda create -n cosyvoice python=3.10 -y
    conda install -n cosyvoice -c conda-forge pynini==2.1.5 -y
    ```
-3. Clone CosyVoice（放在 repo 外面，`C:\pianoplayer\CosyVoice`，不要 vendor
-   進 imood-backend，模型檔案加起來好幾 GB）：
+3. Clone CosyVoice（放在 `C:\imood-backend\CosyVoice`；雖然實體上在 repo
+   目錄底下，但已加進 `.gitignore` 不進版控，模型檔案加起來好幾 GB）：
    ```
-   git clone --depth 1 https://github.com/FunAudioLLM/CosyVoice.git C:\pianoplayer\CosyVoice
-   cd C:\pianoplayer\CosyVoice
+   git clone --depth 1 https://github.com/FunAudioLLM/CosyVoice.git C:\imood-backend\CosyVoice
+   cd C:\imood-backend\CosyVoice
    git submodule update --init --recursive   # 補 third_party/Matcha-TTS
    ```
 4. 裝 `requirements.txt`（`cosyvoice` conda env 的 python）：
@@ -111,7 +111,7 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
 
 ```
 # 1. TTS 服務（cosyvoice conda env，在 imood-backend 目錄下執行）
-C:\pianoplayer\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
+C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
 
 # 2. 主服務（imood-backend 主 venv，照原本方式）
 uvicorn server:app --host 0.0.0.0 --port 8000 --reload

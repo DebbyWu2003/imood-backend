@@ -6,7 +6,7 @@
 # llama-cpp-python 環境不相容。詳細環境建置步驟見 docs/tts-prototype-notes.md。
 #
 # 啟動方式（用 cosyvoice conda env 的 python，在本檔案所在目錄執行）：
-#   C:\pianoplayer\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
+#   C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
 #
 # server.py 透過 tts_client.py 呼叫這裡的 /synthesize，兩個 process 用
 # HTTP 通訊，互相獨立——這個服務掛掉不影響 /ws/audio 的文字回覆流程。
@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 # CosyVoice 是外部 checkout，不進這個 repo（跟 models/*.gguf 一樣太大不適合
 # 進版控）。路徑可用環境變數覆蓋，預設對齊這次 session 實際 clone 的位置。
-COSYVOICE_REPO = os.environ.get("COSYVOICE_REPO", r"C:\pianoplayer\CosyVoice")
+COSYVOICE_REPO = os.environ.get("COSYVOICE_REPO", r"C:\imood-backend\CosyVoice")
 sys.path.insert(0, COSYVOICE_REPO)
 sys.path.insert(0, os.path.join(COSYVOICE_REPO, "third_party", "Matcha-TTS"))
 
