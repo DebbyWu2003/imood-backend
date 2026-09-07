@@ -33,6 +33,48 @@ venv\Scripts\python -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 後端跑在別台機器或別的 port，記得把 HTML 裡的 `CHAT_STREAM_URL` /
 `CHAT_API_URL` 改掉。
 
+## 語音回覆（TTS，CosyVoice，選用）
+
+回覆文字轉語音是另一個獨立 process（`tts_service.py`），跑在另一個
+conda 環境，透過 HTTP 被 `server.py` 呼叫（見 `tts_client.py`）。原因、
+完整環境建置步驟、已知限制都記在 `docs/tts-prototype-notes.md`，這裡
+只列啟動指令：
+
+```bash
+C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
+```
+
+`tts_service` 沒啟動或連不上也沒關係——`/ws/audio` 的文字回覆流程不受
+影響，只是沒有語音。**第一次建置**（新機器、新 clone）請照
+`docs/tts-prototype-notes.md` 的步驟裝 Miniconda + CosyVoice，不能只靠
+`git clone` 這個 repo，因為 CosyVoice、miniconda3、預訓練模型加起來十幾
+GB，故意排除在版控外（見下一節）。
+
+## 換一台機器跑起來（全新環境建置 checklist）
+
+這個 repo 只有程式碼進版控；CosyVoice、miniconda3、LLM/ASR 模型檔都刻意
+排除在外（單靠 `git clone` 拉不到，見 `.gitignore`），每台新機器都要照
+下面順序重新建置一次：
+
+1. **Clone repo**：`git clone https://github.com/DebbyWu2003/imood-backend C:\imood-backend`
+   （建議路徑保持 `C:\imood-backend`，`tts_service.py` 裡 `COSYVOICE_REPO`
+   的預設值是寫死這個路徑；要放別的路徑也可以，改用環境變數
+   `COSYVOICE_REPO` 覆蓋即可，不用動程式碼）
+2. **主服務 venv + LLM 模型**：照上面「啟動步驟」，裝 `requirements.txt`
+   （含 llama-cpp-python 的 wheel 繞過法）、下載 Qwen GGUF 模型到 `models/`
+3. **TTS 環境**：照 `docs/tts-prototype-notes.md` 完整走一次——裝
+   Miniconda 到 `C:\imood-backend\miniconda3`（**帳號名稱含中文/非 ASCII
+   字元的機器，NSIS 安裝程式會直接裝失敗**，要選純英數路徑）、建
+   `cosyvoice` conda env、clone CosyVoice + submodule、裝依賴（含
+   `openai-whisper` build 繞過法、`opencc-python-reimplemented`）、下載
+   CosyVoice-300M-SFT 預訓練模型（~5GB，視網速可能要 30-50 分鐘）
+4. **兩個服務都起來**：一個 terminal 跑 tts_service（cosyvoice env，
+   port 8001），另一個跑 `server.py`（主 venv，port 8000）
+5. 瀏覽器打開 `demo-imood-dashboard.html`
+
+之後要在新機器上**繼續編輯**，就是正常的 git clone/pull/push；只有上面
+第 3 步（CosyVoice 環境）不會跟著 git 走，每台機器要各自建一次。
+
 ## 麥克風／voice-only 語音輸入
 （2026-08-29 決定先做 voice-only，text2voice 暫緩。ASR→LLM 端到端已跑通，
 細節見 `docs/asr-41-results.md`、`docs/asr-42-vad-plan.md`）
