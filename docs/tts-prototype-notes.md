@@ -21,10 +21,17 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
 1. **Miniconda**：裝到 `C:\imood-backend\miniconda3`（**不要**裝在使用者
    家目錄底下，這台機器的使用者名稱含中文字元，Miniconda 的 NSIS 安裝程式
    對非 ASCII 路徑會直接安裝失敗，退而求其次選一個全英數字路徑）。
-2. 建立 conda 環境：
+   `winget install Anaconda.Miniconda3` 會裝到 `C:\Users\<user>\miniconda3`，
+   不是這裡要的路徑；改用官方 installer 靜默裝到指定位置：
    ```
-   conda create -n cosyvoice python=3.10 -y
-   conda install -n cosyvoice -c conda-forge pynini==2.1.5 -y
+   Miniconda3-latest-Windows-x86_64.exe /S /InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /D=C:\imood-backend\miniconda3
+   ```
+2. 建立 conda 環境（新版 conda 對 `repo.anaconda.com` 預設頻道會擋
+   `CondaToSNonInteractiveError`；全程加 `-c conda-forge --override-channels`
+   避開，pynini 本來就在 conda-forge）：
+   ```
+   conda create -n cosyvoice -c conda-forge --override-channels python=3.10 -y
+   conda install -n cosyvoice -c conda-forge --override-channels pynini==2.1.5 -y
    ```
 3. Clone CosyVoice（放在 `C:\imood-backend\CosyVoice`；雖然實體上在 repo
    目錄底下，但已加進 `.gitignore` 不進版控，模型檔案加起來好幾 GB）：
@@ -33,6 +40,9 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
    cd C:\imood-backend\CosyVoice
    git submodule update --init --recursive   # 補 third_party/Matcha-TTS
    ```
+   （2026-09 重建時 upstream `requirements.txt` 已比本文件當初新一版——多了
+   `wetext`、`x-transformers`，`tts_service.py` 用的 `AutoModel` API 也在，
+   下面的 `openai-whisper` / `opencc` 繞過法仍然需要。）
 4. 裝 `requirements.txt`（`cosyvoice` conda env 的 python）：
    ```
    <miniconda>\envs\cosyvoice\python.exe -m pip install -r requirements.txt

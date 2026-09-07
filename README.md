@@ -10,11 +10,16 @@
 
 ```bash
 cd imood-backend
-python -m venv venv
-venv\Scripts\python -m pip install -r requirements.txt
-#  Windows 上 llama-cpp-python 的 source build 會因路徑過長失敗，改用預編 wheel：
-#  venv\Scripts\python -m pip install llama-cpp-python \
-#      --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+python -m venv venv            # Python 3.12 實測 OK（3.14 也行，但預編 wheel 常落後）
+
+#  llama-cpp-python 的 source build 在 Windows 會因路徑過長失敗，要靠預編 CPU
+#  wheel。加 --prefer-binary + extra-index-url 就能一次裝完 requirements.txt：
+venv\Scripts\python -m pip install -r requirements.txt --prefer-binary \
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+#  → 若之後 import 時報 "Could not find module llama.dll (or one of its dependencies)"，
+#    是缺 MSVC runtime：winget install Microsoft.VCRedist.2015+.x64
+#  （若 wheel 那步還是失敗，就先 pip install 其他套件、最後單獨用上面同一個
+#   --extra-index-url 裝 llama-cpp-python）
 
 # 下載模型放到 models/qwen2.5-1.5b-instruct-q4_k_m.gguf
 #   python -c "from huggingface_hub import hf_hub_download; import shutil; \
@@ -60,14 +65,18 @@ GB，故意排除在版控外（見下一節）。
    （建議路徑保持 `C:\imood-backend`，`tts_service.py` 裡 `COSYVOICE_REPO`
    的預設值是寫死這個路徑；要放別的路徑也可以，改用環境變數
    `COSYVOICE_REPO` 覆蓋即可，不用動程式碼）
-2. **主服務 venv + LLM 模型**：照上面「啟動步驟」，裝 `requirements.txt`
-   （含 llama-cpp-python 的 wheel 繞過法）、下載 Qwen GGUF 模型到 `models/`
+2. **主服務 venv + LLM 模型**：照上面「啟動步驟」，分兩步裝依賴
+   （llama-cpp-python 走預編 CPU wheel；import 報缺 `llama.dll` 就
+   `winget install Microsoft.VCRedist.2015+.x64`）、下載 Qwen GGUF 模型到 `models/`
 3. **TTS 環境**：照 `docs/tts-prototype-notes.md` 完整走一次——裝
    Miniconda 到 `C:\imood-backend\miniconda3`（**帳號名稱含中文/非 ASCII
-   字元的機器，NSIS 安裝程式會直接裝失敗**，要選純英數路徑）、建
-   `cosyvoice` conda env、clone CosyVoice + submodule、裝依賴（含
-   `openai-whisper` build 繞過法、`opencc-python-reimplemented`）、下載
-   CosyVoice-300M-SFT 預訓練模型（~5GB，視網速可能要 30-50 分鐘）
+   字元的機器，NSIS 安裝程式會直接裝失敗**，要選純英數路徑；`winget install
+   Anaconda.Miniconda3` 會裝到家目錄不是這個路徑，要用官方 installer 加
+   `/D=C:\imood-backend\miniconda3` 靜默安裝）、建 `cosyvoice` conda env
+   （新版 conda 對預設頻道會擋 ToS，全程加 `-c conda-forge --override-channels`
+   繞過）、clone CosyVoice + submodule、裝依賴（含 `openai-whisper` build
+   繞過法、`opencc-python-reimplemented`）、下載 CosyVoice-300M-SFT 預訓練
+   模型（~5GB，視網速可能要 30-50 分鐘）
 4. **兩個服務都起來**：一個 terminal 跑 tts_service（cosyvoice env，
    port 8001），另一個跑 `server.py`（主 venv，port 8000）
 5. 瀏覽器打開 `demo-imood-dashboard.html`
