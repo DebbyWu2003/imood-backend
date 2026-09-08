@@ -32,6 +32,24 @@ venv\Scripts\python -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 `server.py` 啟動時會載入 Qwen（llama.cpp）**與** faster-whisper `small`
 （voice-only ASR 用，第一次跑會自動下載 ~480MB 模型到 HF 快取）。
 
+### GPU 加速（選用，有 NVIDIA 顯卡才裝）
+
+```bash
+venv\Scripts\python -m pip install -r requirements-gpu.txt   # nvidia-cudnn / cublas
+```
+
+裝好後 `server.py` 的 ASR 會自動偵測 CUDA（`device="auto"`）並改用
+`cuda + float16`：small 模型 6s 音檔辨識 ~1.8s → ~0.3s。`ASR_DEVICE=cpu`
+可強制關掉。實測數字與各元件細節見 `docs/gpu-notes.md`。
+
+- **LLM**：Windows 沒有 llama-cpp-python 的 GPU 預編 wheel（abetlen 只出到
+  0.2.68），要 GPU 得自己 source build。Qwen 1.5B 純 CPU 本來就 ~1s，除非
+  換大模型否則不值得。
+- **TTS（CosyVoice）**：torch 部分只要環境有 CUDA 就自動上 GPU（不用設定）。
+  但 Windows torch 沒 flash-attn，CosyVoice-1 也沒 vLLM，RTF 卡在 ~1.5×；
+  TensorRT（`TTS_USE_TRT=1`）實測也救不了（瓶頸是 AR decoder 不是 diffusion
+  decoder）。要更快得在 Linux/WSL 跑 tts_service。見 `docs/gpu-notes.md`。
+
 啟動後，直接用瀏覽器打開 `demo-imood-dashboard.html` 即可（它會呼叫
 `http://localhost:8000/api/chat/stream` 做逐字 streaming 顯示，連不上時
 自動退回 `http://localhost:8000/api/chat` 非 streaming 版本）。若你的
