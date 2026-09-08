@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -20,6 +22,36 @@ from typing import Optional
 import numpy as np
 
 logger = logging.getLogger("voice_asr")
+
+
+def _register_nvidia_dll_dirs() -> None:
+    """
+    Windows：CTranslate2 (faster-whisper 的後端) 不會自己把 pip 裝的
+    nvidia-cudnn-cu12 / nvidia-cublas-cu12 的 bin 目錄加進 DLL 搜尋路徑，
+    GPU 推論時會報 `cublas64_12.dll is not found`。這裡在 import 前補上。
+    純 CPU 也沒差（目錄不存在就跳過）。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import nvidia  # noqa: F401  — 只是拿它的 __path__
+    except ImportError:
+        return
+    for pkg in ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime"):
+        for base in getattr(sys.modules.get("nvidia"), "__path__", []):
+            d = os.path.join(base, pkg, "bin")
+            if os.path.isdir(d):
+                try:
+                    os.add_dll_directory(d)
+                except OSError:
+                    pass
+                # add_dll_directory 對 CTranslate2 延遲載入的相依還不夠，
+                # PATH 也要補上才找得到 cublas64_12.dll。
+                if d not in os.environ.get("PATH", ""):
+                    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+
+
+_register_nvidia_dll_dirs()
 
 SAMPLE_RATE = 16000
 SAMPLE_WIDTH = 2  # 16-bit
@@ -219,8 +251,12 @@ DEFAULT_ZH_PROMPT = "以下是台灣人的日常對話，請以繁體中文輸�
 
 
 class Transcriber:
-    def __init__(self, model_size: str = "small", device: str = "cpu",
-                 compute_type: str = "int8", language: str = "zh",
+    # device / compute_type 預設 "auto"：有 CUDA GPU 就用 cuda + float16
+    # （small 模型 6s 音檔實測 1.8s -> ~0.3s），否則退回 cpu + int8。
+    # 需要 GPU 時，主 venv 要裝 nvidia-cudnn-cu12（9.x）+ nvidia-cublas-cu12，
+    # CTranslate2 才找得到 cuDNN。可用環境變數 ASR_DEVICE=cpu 強制關掉。
+    def __init__(self, model_size: str = "small", device: str = "auto",
+                 compute_type: str = "auto", language: str = "zh",
                  initial_prompt: str = DEFAULT_ZH_PROMPT):
         self.model_size = model_size
         self.device = device
@@ -229,14 +265,49 @@ class Transcriber:
         self.initial_prompt = initial_prompt or None
         self._model = None
 
+    def _resolve_device(self) -> None:
+        import os
+
+        if self.device == "auto":
+            self.device = os.environ.get("ASR_DEVICE", "auto")
+        if self.device == "auto":
+            try:
+                import ctranslate2
+
+                self.device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("CUDA 偵測失敗，改用 CPU: %s", exc)
+                self.device = "cpu"
+        if self.compute_type == "auto":
+            self.compute_type = "float16" if self.device == "cuda" else "int8"
+
     def load(self) -> None:
         from faster_whisper import WhisperModel
 
+        self._resolve_device()
         t0 = time.perf_counter()
-        self._model = WhisperModel(self.model_size, device=self.device,
-                                   compute_type=self.compute_type)
-        logger.info("faster-whisper %s/%s loaded in %.1fs",
-                    self.model_size, self.compute_type, time.perf_counter() - t0)
+        try:
+            self._model = WhisperModel(self.model_size, device=self.device,
+                                       compute_type=self.compute_type)
+        except Exception as exc:  # noqa: BLE001 — GPU 載入失敗（缺 cuDNN 等）→ 退回 CPU
+            if self.device == "cuda":
+                logger.warning("faster-whisper CUDA 載入失敗，退回 CPU: %s", exc)
+                self.device, self.compute_type = "cpu", "int8"
+                self._model = WhisperModel(self.model_size, device=self.device,
+                                           compute_type=self.compute_type)
+            else:
+                raise
+        logger.info("faster-whisper %s on %s/%s loaded in %.1fs",
+                    self.model_size, self.device, self.compute_type,
+                    time.perf_counter() - t0)
+        if self.device == "cuda":
+            # GPU 第一次推論會卡幾十秒編譯 cuDNN kernel，先用一小段靜音
+            # 打通，避免第一個真的使用者請求爆等。
+            t0 = time.perf_counter()
+            silent = np.zeros(SAMPLE_RATE, dtype=np.float32)
+            list(self._model.transcribe(silent, language=self.language, beam_size=1)[0])
+            logger.info("faster-whisper CUDA warmup done in %.1fs",
+                        time.perf_counter() - t0)
 
     @property
     def ready(self) -> bool:

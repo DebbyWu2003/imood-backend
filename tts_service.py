@@ -30,6 +30,15 @@ sys.path.insert(0, os.path.join(COSYVOICE_REPO, "third_party", "Matcha-TTS"))
 MODEL_DIR = os.path.join(COSYVOICE_REPO, "pretrained_models", "CosyVoice-300M-SFT")
 SPEAKER = "中文女"
 
+# GPU：CosyVoice 的 torch 模型 (llm/flow/hift) 只要 torch.cuda 可用就會自動
+# 上 GPU（不用設任何東西）。實測（Windows + torch 2.3.1，無 flash-attn）：
+#   - 預設 fp32 無 jit：RTF ~1.5×，首塊 ~4s
+#   - load_jit / fp16 反而更慢（2.5–18×），因為 diffusion decoder 的 attention
+#     走 math SDPA kernel，JIT trace 幫不上忙 → 一律不要開
+#   - 要真的快只有 load_trt=True（TensorRT，需另裝 tensorrt + 一次性 build
+#     flow.decoder.estimator engine）。設 TTS_USE_TRT=1 啟用。
+_use_trt = os.environ.get("TTS_USE_TRT", "0") == "1"
+
 TARGET_SAMPLE_RATE = 16000
 CHUNK_MS = 320  # 對齊 JoyGen diffusion decoder 8-frame batch @25fps
 CHUNK_BYTES = int(TARGET_SAMPLE_RATE * (CHUNK_MS / 1000) * 2)  # 16-bit = 2 bytes/sample
@@ -46,7 +55,10 @@ def load_model():
     from cosyvoice.cli.cosyvoice import AutoModel
     from opencc import OpenCC
 
-    cosyvoice = AutoModel(model_dir=MODEL_DIR)
+    import torch
+    trt = _use_trt and torch.cuda.is_available()
+    print(f"[tts] CUDA available={torch.cuda.is_available()}  load_trt={trt}", flush=True)
+    cosyvoice = AutoModel(model_dir=MODEL_DIR, load_trt=trt, fp16=trt)
     # imood 的 LLM 系統提示詞要求一律回覆繁體中文，但 CosyVoice-300M-SFT
     # 的文字前處理主要是針對簡體中文訓練的，餵繁體字進去時，字典裡沒有的
     # 字會念出明顯不像中文的音。這裡只轉換「要合成的文字」，前端顯示的

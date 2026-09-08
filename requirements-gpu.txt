@@ -1,0 +1,18 @@
+# GPU 加速用的額外依賴（主服務 venv）。純 CPU 不用裝。
+#
+#   venv\Scripts\python -m pip install -r requirements-gpu.txt
+#
+# faster-whisper 的後端 CTranslate2 4.8 已能自動找到這些 pip 包，
+# 但 Windows 上還需要把它們的 bin 目錄加進 DLL 搜尋路徑——voice_asr.py
+# 的 _register_nvidia_dll_dirs() 已處理，不用手動設 PATH。
+#
+# 裝好後 server.py 啟動時 Transcriber 會自動偵測到 CUDA（device="auto"），
+# small 模型 6s 音檔辨識從 ~1.8s 降到 ~0.3s。要強制關掉：設 ASR_DEVICE=cpu。
+#
+# 註：llama-cpp-python 的 GPU 版 Windows 沒有現成 wheel（abetlen 只出到
+# 0.2.68），要 GPU 得自己 source build，見 README。TTS(CosyVoice) 的
+# torch 部分只要環境有 CUDA 就會自動上 GPU，不需要這裡的東西。
+
+nvidia-cudnn-cu12==9.*
+nvidia-cublas-cu12
+nvidia-cuda-nvrtc-cu12
