@@ -13,7 +13,7 @@
 $taskName = "imood-tts-wsl-keepalive"
 
 $action  = New-ScheduledTaskAction -Execute "wsl.exe" `
-             -Argument "-d Ubuntu-24.04 --exec /usr/bin/tail -f /dev/null"
+             -Argument "-d Ubuntu-24.04 --exec /usr/bin/sleep infinity"
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $set     = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
              -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) `

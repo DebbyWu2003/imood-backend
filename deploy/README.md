@@ -19,9 +19,10 @@ restarts it if it crashes. `server.py` on Windows talks to it over
 `systemd=true` alone is **not** enough: WSL2 tears the VM down once the last
 `wsl.exe` client exits, and systemd stops every service on the way down. So you
 need both (a) `.wslconfig` `vmIdleTimeout=-1`, and (b) a logon task that keeps one
-`wsl.exe` client attached. `register-windows-boot-task.ps1` sets up (b); (a) is a
-plain file already at `%USERPROFILE%\.wslconfig` — run `wsl --shutdown` once to
-apply it.
+`wsl.exe` client attached (`wsl.exe -d Ubuntu-24.04 --exec /usr/bin/sleep infinity`
+— note `tail -f /dev/null` exits 1 under `--exec`, use `sleep`).
+`register-windows-boot-task.ps1` sets up (b); (a) is a plain file already at
+`%USERPROFILE%\.wslconfig` — run `wsl --shutdown` once to apply it.
 
 ## Install
 
