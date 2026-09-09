@@ -3,9 +3,11 @@
 測試機：Intel i7-8700 (6C/12T) + RTX 4090 24GB + 64GB RAM，Windows 11。
 輸入：`demo-assets/sample-zh.wav`（6.05s），以真實麥克風速率餵 `/ws/audio`，每階段 3 次平均。
 
-> **2026-09-09 更新**：TTS 已換成 **CosyVoice2-0.5B + vLLM**（跑在 WSL2），
-> `inference_zero_shot` 首塊 ~4s → **~1.0s**、RTF ~1.55× → **~0.24×**。
-> 詳見最下方「CosyVoice2-0.5B + vLLM 遷移實測」。
+> **2026-09-09 更新**：
+> - TTS 已換成 **CosyVoice2-0.5B + vLLM**（跑在 WSL2），`inference_zero_shot`
+>   首塊 ~4s → **~1.0s**、RTF ~1.55× → **~0.24×**。詳見最下方遷移實測。
+> - LLM（llama.cpp）也上 GPU 了（`cu125` prebuilt wheel），短回覆推論 ~1s → **~0.25s**。
+>   見下方「LLM（Qwen / llama.cpp）→ GPU」。
 
 ## 使用者「講完話」後的等待時間
 
@@ -33,11 +35,29 @@
 - 原因：瓶頸是 CosyVoice-300M 的 **autoregressive 語音 token decoder**（逐 token 生成），Windows torch 無 flash-attn、CosyVoice-1 無 vLLM。TRT 只加速後段 diffusion decoder。
 - 預設 `TTS_USE_TRT=0`。engine 已建好，要開隨時開。
 
-## LLM（Qwen / llama.cpp）→ GPU ⏭️ 跳過
+## LLM（Qwen / llama.cpp）→ GPU ✅ 2026-09-09 做了
 
-- abetlen 的 Windows CUDA wheel 只到 0.2.68（2024），0.3.x 只有 Linux wheel。
-- 要 GPU 得 `CMAKE_ARGS="-DGGML_CUDA=on"` source build（Windows 上會遇路徑過長）。
-- Qwen 1.5B q4 純 CPU ~1s，省 <1s，不值得。換 7B+ 大模型時才做。
+- `server.py` 載入時自動偵測（`_resolve_n_gpu_layers()`，照 `voice_asr` 的 `_resolve_device()`）：
+  `llama_supports_gpu_offload()` 為真就 `n_gpu_layers=-1` 整包 offload，否則 CPU。
+  `LLM_DEVICE=cpu` 或 `LLM_N_GPU_LAYERS=<n>` 可覆寫。
+- **裝法**（主 venv，`C:\imood-backend\venv`）：
+  ```
+  venv\Scripts\python -m pip install --force-reinstall --no-cache-dir --no-deps \
+    llama-cpp-python==0.3.35 \
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu125
+  venv\Scripts\python -m pip install --no-cache-dir "nvidia-cuda-runtime-cu12==12.9.*"
+  ```
+  - abetlen 的 `whl/cu124` 也有 0.3.35 win_amd64，但實測 **`llama_init_from_model` 直接
+    `0xc000001d`（illegal instruction）**——要用 **`cu125`**（跟 venv 現有 cublas 12.9 相容）。
+  - CUDA runtime DLL：venv 原本只有 `nvidia-cublas-cu12` / `nvidia-cudnn-cu12`（ASR 裝的），
+    **缺 `cudart64_12.dll`** → 補裝 `nvidia-cuda-runtime-cu12`。
+  - Windows 不會自己把 pip 版 `nvidia\*\bin` 加進 DLL 搜尋路徑：`server.py` 靠
+    **先 `import voice_asr`（它 import 時跑 `_register_nvidia_dll_dirs()`）再 `import llama_cpp`**
+    解決（import 順序不能反）。
+- **實測**（RTX 4090，Qwen2.5-1.5B q4_k_m，n_ctx=2048）：
+  - 29/29 層 offload 到 GPU，CUDA0 buffer ~935 MiB。
+  - 載入 ~0.9s；短回覆推論 **~0.25s**（純 CPU 約 1s）。省 ~0.7s。
+  - 1.5B 上省得不多，但換 7B+ 大模型時這條路已經打通。
 
 ## 要再壓 TTS 延遲
 

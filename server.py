@@ -13,6 +13,11 @@
 # 之後拿到 RTX 4090，若想換更大的模型(如 MiniCPM-2B、ChatGLM3-6B)，
 # 只要換 MODEL_PATH，或改用 transformers 版本的載入方式即可，
 # /api/chat 這個介面不需要變。
+#
+# GPU：載入時會自動偵測（見 _resolve_n_gpu_layers()）——llama-cpp-python 若是
+# CUDA build 就整包 offload 到 GPU，否則純 CPU。2026-09-09 起主 venv 裝的是
+# cu124 prebuilt wheel（abetlen 的 whl/cu124 index）+ nvidia-cuda-runtime-cu12，
+# 所以在這台 4090 上預設就會上 GPU。LLM_DEVICE=cpu 可強制關掉。
 # ============================================================
 
 from typing import Optional
@@ -21,14 +26,19 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from llama_cpp import Llama
 import asyncio
 import json
+import os
 import time
 
 import base64
 
+# voice_asr 在 import 時就把 pip 版 nvidia-*-cu12 的 bin 目錄加進 DLL 搜尋路徑
+# （見 voice_asr._register_nvidia_dll_dirs）。llama-cpp-python 的 CUDA build 同樣
+# 要靠這些 DLL（cudart64_12 / cublas64_12），Windows 上又不會自己找 pip 裝的版本，
+# 所以一定要在 import llama_cpp 之前先 import voice_asr。
 from voice_asr import Endpointer, Transcriber
+from llama_cpp import Llama
 from tts_client import stream_tts
 
 MODEL_PATH = "./models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
@@ -79,15 +89,63 @@ _asr_lock = asyncio.Lock()
 _llm_lock = asyncio.Lock()
 
 
+def _resolve_n_gpu_layers() -> int:
+    """決定 llama.cpp 要 offload 幾層到 GPU，跟 voice_asr.Transcriber._resolve_device()
+    同一套思路：預設 "auto" —— 這顆 llama-cpp-python wheel 若編了 GPU backend
+    （llama_supports_gpu_offload() 為真，通常是 CUDA build）就整包 offload（-1），
+    否則純 CPU（0）。可用環境變數強制：LLM_DEVICE=cpu 關掉、LLM_DEVICE=cuda 強制開，
+    或 LLM_N_GPU_LAYERS 直接指定層數（-1 = 全部）。
+    註：CPU 版的 llama-cpp-python 吃不到 GPU，要先換成 CUDA build。"""
+    override = os.environ.get("LLM_N_GPU_LAYERS")
+    if override is not None:
+        try:
+            return int(override)
+        except ValueError:
+            print(f"[llm] LLM_N_GPU_LAYERS={override!r} 不是整數，忽略", flush=True)
+
+    device = os.environ.get("LLM_DEVICE", "auto").lower()
+    if device == "cpu":
+        return 0
+    if device == "cuda":
+        return -1
+    try:
+        from llama_cpp import llama_supports_gpu_offload
+
+        return -1 if llama_supports_gpu_offload() else 0
+    except Exception as exc:  # noqa: BLE001 — 偵測失敗一律當沒有 GPU
+        print(f"[llm] GPU 偵測失敗，改用 CPU: {exc}", flush=True)
+        return 0
+
+
 @app.on_event("startup")
 def load_model():
     global llm, transcriber
-    llm = Llama(
-        model_path=MODEL_PATH,
-        n_ctx=N_CTX,
-        n_threads=N_THREADS,
-        verbose=False,
-    )
+    n_gpu_layers = _resolve_n_gpu_layers()
+    t0 = time.perf_counter()
+    try:
+        llm = Llama(
+            model_path=MODEL_PATH,
+            n_ctx=N_CTX,
+            n_threads=N_THREADS,
+            n_gpu_layers=n_gpu_layers,
+            verbose=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — GPU 載入失敗（缺 CUDA runtime 等）→ 退回 CPU
+        if n_gpu_layers != 0:
+            print(f"[llm] GPU 載入失敗，退回 CPU: {exc}", flush=True)
+            n_gpu_layers = 0
+            llm = Llama(
+                model_path=MODEL_PATH,
+                n_ctx=N_CTX,
+                n_threads=N_THREADS,
+                n_gpu_layers=0,
+                verbose=False,
+            )
+        else:
+            raise
+    where = f"GPU (n_gpu_layers={n_gpu_layers})" if n_gpu_layers != 0 else "CPU"
+    print(f"[llm] Qwen2.5-1.5B on {where} loaded in {time.perf_counter() - t0:.1f}s",
+          flush=True)
     transcriber = Transcriber(model_size=ASR_MODEL_SIZE)
     transcriber.load()
 
