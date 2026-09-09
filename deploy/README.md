@@ -12,17 +12,22 @@ restarts it if it crashes. `server.py` on Windows talks to it over
 | `imood-tts.env` | `/etc/imood-tts.env` (WSL) | tunables: volume, voice, model paths |
 | `install-wsl-tts-service.sh` | run in WSL | installs + enables + starts the above |
 | `register-windows-boot-task.ps1` | run elevated on Windows | logon keepalive that holds WSL up |
-| `../../.wslconfig` (`%USERPROFILE%\.wslconfig`) | — | `vmIdleTimeout=-1` so the VM doesn't idle out |
 
-## Why the keepalive
+## Why the keepalive (read this)
 
-`systemd=true` alone is **not** enough: WSL2 tears the VM down once the last
-`wsl.exe` client exits, and systemd stops every service on the way down. So you
-need both (a) `.wslconfig` `vmIdleTimeout=-1`, and (b) a logon task that keeps one
-`wsl.exe` client attached (`wsl.exe -d Ubuntu-24.04 --exec /usr/bin/sleep infinity`
-— note `tail -f /dev/null` exits 1 under `--exec`, use `sleep`).
-`register-windows-boot-task.ps1` sets up (b); (a) is a plain file already at
-`%USERPROFILE%\.wslconfig` — run `wsl --shutdown` once to apply it.
+`systemd=true` alone is **not** enough. WSL2 powers the VM off a few seconds
+after the last `wsl.exe` client exits — systemd stops every service, and because
+the enabled `imood-tts` unit auto-starts on the next boot but takes ~50 s to warm
+up (vLLM CUDA-graph capture), a machine with no attached client sits in a
+restart death-spiral and never becomes usable.
+
+There is no working `.wslconfig` knob for this on WSL 2.7 (`vmIdleTimeout=-1` has
+no effect). The fix is to **keep one `wsl.exe` client attached at all times**:
+`register-windows-boot-task.ps1` registers a logon task that runs
+`wsl.exe -d Ubuntu-24.04 --exec /usr/bin/sleep infinity` forever.
+(`tail -f /dev/null` exits 1 under `--exec` — must be `sleep`.)
+
+Until you sign out/in after registering it, keep any WSL terminal window open.
 
 ## Install
 
@@ -35,8 +40,13 @@ sudo bash /mnt/c/imood-backend/deploy/install-wsl-tts-service.sh
 **2. On Windows**, in an **elevated** PowerShell (once):
 
 ```powershell
-wsl --shutdown   # picks up %USERPROFILE%\.wslconfig
 powershell -ExecutionPolicy Bypass -File C:\imood-backend\deploy\register-windows-boot-task.ps1
+```
+
+The script registers the task **and starts it now**. Confirm it stuck:
+
+```powershell
+Get-ScheduledTask imood-tts-wsl-keepalive | Get-ScheduledTaskInfo | Select LastTaskResult  # want 267009 = "still running"
 ```
 
 ## Operate (from WSL)

@@ -16,6 +16,9 @@ ExecStart=/root/miniconda3/envs/cosyvoice_vllm/bin/python -m uvicorn tts_service
 # vLLM CUDA-graph capture + TRT engine load make a warm start ~40s; cold (first
 # run after a model/engine change) can take several minutes.
 TimeoutStartSec=900
+# On stop, don't let vLLM's child procs stall a WSL poweroff for 10s+.
+KillMode=mixed
+TimeoutStopSec=15
 Restart=always
 RestartSec=5
 StandardOutput=append:/var/log/imood-tts.log
