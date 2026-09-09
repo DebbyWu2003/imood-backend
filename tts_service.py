@@ -32,6 +32,7 @@ import os
 import sys
 from typing import Iterator
 
+import numpy as np
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -75,6 +76,27 @@ LOAD_VLLM = _flag("TTS_LOAD_VLLM", "1" if _IS_V2 else "0")
 LOAD_TRT = _flag("TTS_LOAD_TRT", "1" if _IS_V2 else "0")
 LOAD_JIT = _flag("TTS_LOAD_JIT", "0")
 FP16 = _flag("TTS_FP16", "1" if _IS_V2 else "0")
+
+
+def _f(name: str, default: str) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return float(default)
+
+
+# --- 音量 -----------------------------------------------------------------
+# CosyVoice2 zero-shot 原始輸出偏小聲（active RMS ~-22 dBFS）。_level() 對每個
+# model chunk（~2s）做 RMS 正規化到 TTS_RMS_DBFS，峰值壓在 TTS_PEAK_DBFS 以下，
+# 超過的部分用 tanh soft knee 收（不硬削）。TTS_GAIN 是最後再乘的手動微調。
+# 想更大聲：TTS_RMS_DBFS=-12（再吵設 -10）。想關掉正規化：TTS_NORMALIZE=0。
+NORMALIZE = _flag("TTS_NORMALIZE", "1")
+_TARGET_RMS = 10 ** (_f("TTS_RMS_DBFS", "-14.0") / 20)
+_CEIL = 10 ** (_f("TTS_PEAK_DBFS", "-1.0") / 20)
+GAIN = _f("TTS_GAIN", "1.0")
+# TTS_DRIVE > 1 先做一層 tanh 軟飽和壓峰值（降 crest factor），normalize 之後
+# RMS 就能推更高＝聽起來更大聲。1.0 = 關；1.5~2.5 之間微調（太高會鼻音/破）。
+_DRIVE = max(_f("TTS_DRIVE", "1.0"), 1.0)
 
 TARGET_SAMPLE_RATE = 16000
 CHUNK_MS = 320  # 對齊 JoyGen diffusion decoder 8-frame batch @25fps
@@ -134,14 +156,38 @@ class SynthesizeRequest(BaseModel):
     text: str
 
 
-def _pcm16_bytes(speech_tensor, resampler) -> bytes:
-    """CosyVoice tensor（22050/24000Hz float, shape [1, N]）-> 16kHz PCM16 bytes。"""
-    import numpy as np
+def _level(x: "np.ndarray") -> "np.ndarray":
+    """單一 model chunk（~2s）的音量處理：RMS 正規化到目標、峰值不超過天花板，
+    再用 tanh soft knee 收尾。純 numpy / CPU。"""
+    peak = float(np.abs(x).max())
+    if peak < 1e-4:
+        return x  # 整段近乎靜音，別放大噪音底
+    if _DRIVE > 1.0:
+        x = np.tanh(x * _DRIVE) / np.tanh(_DRIVE)
+        peak = float(np.abs(x).max())
+    if NORMALIZE:
+        voiced = x[np.abs(x) > 0.02]
+        if voiced.size > x.size * 0.05:
+            rms = float(np.sqrt(np.mean(voiced ** 2)))
+            g = min(_TARGET_RMS / max(rms, 1e-6), _CEIL / peak)
+            x = x * float(np.clip(g, 0.25, 12.0))
+    if GAIN != 1.0:
+        x = x * GAIN
+    a = np.abs(x)
+    hot = a > _CEIL
+    if hot.any():
+        x = x.copy()
+        x[hot] = np.sign(x[hot]) * (
+            _CEIL + (1.0 - _CEIL) * np.tanh((a[hot] - _CEIL) / (1.0 - _CEIL))
+        )
+    return x
 
-    resampled = resampler(speech_tensor)  # [1, M] @ TARGET_SAMPLE_RATE
-    samples = resampled.squeeze(0).clamp(-1.0, 1.0).numpy()
-    pcm16 = (samples * 32767.0).astype(np.int16)
-    return pcm16.tobytes()
+
+def _pcm16_bytes(speech_tensor, resampler) -> bytes:
+    """CosyVoice tensor（22050/24000Hz float, shape [1, N]）-> 16kHz PCM16 bytes（套 _level）。"""
+    x = resampler(speech_tensor).squeeze(0).numpy().astype(np.float32)
+    x = _level(x)
+    return (np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
 
 
 def _model_chunks(text: str):

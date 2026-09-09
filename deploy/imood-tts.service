@@ -1,0 +1,25 @@
+[Unit]
+Description=imood.ai TTS service (CosyVoice2-0.5B + vLLM, WSL2)
+Documentation=https://claude.ai/code/session_01Mp2FpHSMNmPgtgxaUJh45N
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=8
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/c/imood-backend
+# Tunables (voice, volume, model paths) live here so you never edit this unit:
+EnvironmentFile=-/etc/imood-tts.env
+ExecStart=/root/miniconda3/envs/cosyvoice_vllm/bin/python -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
+# vLLM CUDA-graph capture + TRT engine load make a warm start ~40s; cold (first
+# run after a model/engine change) can take several minutes.
+TimeoutStartSec=900
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/imood-tts.log
+StandardError=append:/var/log/imood-tts.log
+
+[Install]
+WantedBy=multi-user.target
