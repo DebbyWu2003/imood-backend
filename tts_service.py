@@ -2,17 +2,32 @@
 # tts_service.py —— CosyVoice 中文語音合成服務（獨立 process）
 #
 # 這個檔案**不**跑在 imood-backend 主 venv（Python 3.14）裡，因為 CosyVoice
-# 需要 PyTorch + pynini（Windows 上只能透過 conda 裝），跟主 venv 的
-# llama-cpp-python 環境不相容。詳細環境建置步驟見 docs/tts-prototype-notes.md。
+# 需要 PyTorch + pynini，跟主 venv 的 llama-cpp-python 環境不相容。
 #
-# 啟動方式（用 cosyvoice conda env 的 python，在本檔案所在目錄執行）：
-#   C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
+# 兩種後端，用 COSYVOICE_MODEL_DIR 指到哪個模型就跑哪個：
 #
-# server.py 透過 tts_client.py 呼叫這裡的 /synthesize，兩個 process 用
-# HTTP 通訊，互相獨立——這個服務掛掉不影響 /ws/audio 的文字回覆流程。
+#   1) CosyVoice2-0.5B（預設，跑在 WSL2 的 cosyvoice_vllm conda env）
+#      - LLM backbone 換成 Qwen2 → vLLM（load_vllm=True）吃得到，AR 語音
+#        token decoder 大幅加速，這是壓 `reply_done -> audio_first` 那 ~4s 的
+#        唯一有效路徑（見 docs/gpu-notes.md）。vLLM 沒有 Windows CUDA 版，
+#        所以這條路一定在 WSL2 跑；server.py 仍在 Windows，打 localhost:8001。
+#      - 沒有內建 SFT 語者（中文女/男），改用 zero-shot：啟動時餵一段 3~10s
+#        參考音檔註冊成一個 speaker id，之後每個請求引用該 id（不重抽特徵）。
+#      啟動：
+#        COSYVOICE_REPO=/root/CosyVoice MODELSCOPE_OFFLINE=1 \
+#        /root/miniconda3/envs/cosyvoice_vllm/bin/python -m uvicorn \
+#        tts_service:app --host 0.0.0.0 --port 8001
+#
+#   2) CosyVoice-300M-SFT（舊路徑，Windows cosyvoice conda env）
+#      - 內建「中文女」SFT 語者，inference_sft。vLLM 對 v1 無效。
+#      啟動：
+#        C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn \
+#        tts_service:app --host 0.0.0.0 --port 8001
+#
+# server.py 透過 tts_client.py 呼叫 /synthesize，HTTP 通訊、兩個 process
+# 互相獨立——這個服務掛掉不影響 /ws/audio 的文字回覆流程。
 # ============================================================
 
-import io
 import os
 import sys
 from typing import Iterator
@@ -21,23 +36,45 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-# CosyVoice 是外部 checkout，不進這個 repo（跟 models/*.gguf 一樣太大不適合
-# 進版控）。路徑可用環境變數覆蓋，預設對齊這次 session 實際 clone 的位置。
+# CosyVoice 是外部 checkout，不進這個 repo（跟 models/*.gguf 一樣太大）。
 COSYVOICE_REPO = os.environ.get("COSYVOICE_REPO", r"C:\imood-backend\CosyVoice")
 sys.path.insert(0, COSYVOICE_REPO)
 sys.path.insert(0, os.path.join(COSYVOICE_REPO, "third_party", "Matcha-TTS"))
 
-MODEL_DIR = os.path.join(COSYVOICE_REPO, "pretrained_models", "CosyVoice-300M-SFT")
-SPEAKER = "中文女"
+# 指到哪個模型就跑哪個後端。預設 CosyVoice2-0.5B。
+_DEFAULT_MODEL = os.path.join(COSYVOICE_REPO, "pretrained_models", "CosyVoice2-0.5B")
+MODEL_DIR = os.environ.get("COSYVOICE_MODEL_DIR", _DEFAULT_MODEL)
 
-# GPU：CosyVoice 的 torch 模型 (llm/flow/hift) 只要 torch.cuda 可用就會自動
-# 上 GPU（不用設任何東西）。實測（Windows + torch 2.3.1，無 flash-attn）：
-#   - 預設 fp32 無 jit：RTF ~1.5×，首塊 ~4s
-#   - load_jit / fp16 反而更慢（2.5–18×），因為 diffusion decoder 的 attention
-#     走 math SDPA kernel，JIT trace 幫不上忙 → 一律不要開
-#   - 要真的快只有 load_trt=True（TensorRT，需另裝 tensorrt + 一次性 build
-#     flow.decoder.estimator engine）。設 TTS_USE_TRT=1 啟用。
-_use_trt = os.environ.get("TTS_USE_TRT", "0") == "1"
+# 是否為 CosyVoice2/3（有 cosyvoice2.yaml / cosyvoice3.yaml）→ 走 zero-shot。
+_IS_V2 = os.path.exists(os.path.join(MODEL_DIR, "cosyvoice2.yaml")) or \
+         os.path.exists(os.path.join(MODEL_DIR, "cosyvoice3.yaml"))
+
+# --- CosyVoice2 zero-shot 參考語者 -------------------------------------------
+# 預設用 CosyVoice repo 自帶的 asset/zero_shot_prompt.wav（一段中文女聲）。
+# 換音色只要換這兩個環境變數（prompt wav + 對應逐字稿），不用改程式。
+PROMPT_WAV = os.environ.get(
+    "TTS_PROMPT_WAV", os.path.join(COSYVOICE_REPO, "asset", "zero_shot_prompt.wav")
+)
+PROMPT_TEXT = os.environ.get("TTS_PROMPT_TEXT", "希望你以后能够做的比我还好呦。")
+ZERO_SHOT_SPK_ID = "imood_default"
+
+# --- CosyVoice-300M-SFT 語者 -----------------------------------------------
+SPEAKER = os.environ.get("TTS_SFT_SPEAKER", "中文女")
+
+# --- 加速開關 --------------------------------------------------------------
+# CosyVoice2：照 repo 的 vllm_example，vllm + trt + fp16 全開；jit 預設關
+#   （缺對應 zip 會直接炸，要開再開）。首次啟動會 export vllm 權重 + build
+#   TensorRT engine（一次性，之後快取成 flow.decoder.estimator.*.plan）。
+# CosyVoice-300M-SFT：jit/fp16 實測更慢（見 docs/gpu-notes.md），一律不開，
+#   只有 TRT 有效果——設 TTS_LOAD_TRT=1 啟用。
+def _flag(name: str, default: str) -> bool:
+    return os.environ.get(name, default) == "1"
+
+
+LOAD_VLLM = _flag("TTS_LOAD_VLLM", "1" if _IS_V2 else "0")
+LOAD_TRT = _flag("TTS_LOAD_TRT", "1" if _IS_V2 else "0")
+LOAD_JIT = _flag("TTS_LOAD_JIT", "0")
+FP16 = _flag("TTS_FP16", "1" if _IS_V2 else "0")
 
 TARGET_SAMPLE_RATE = 16000
 CHUNK_MS = 320  # 對齊 JoyGen diffusion decoder 8-frame batch @25fps
@@ -46,7 +83,7 @@ CHUNK_BYTES = int(TARGET_SAMPLE_RATE * (CHUNK_MS / 1000) * 2)  # 16-bit = 2 byte
 app = FastAPI(title="imood-backend TTS service (CosyVoice)")
 
 cosyvoice = None  # startup 時載入一次，避免每個請求都要重載模型
-_t2s = None  # 繁體轉簡體，見下方 load_model() 的說明
+_t2s = None       # 繁體轉簡體，見下方 load_model() 的說明
 
 
 @app.on_event("startup")
@@ -54,16 +91,43 @@ def load_model():
     global cosyvoice, _t2s
     from cosyvoice.cli.cosyvoice import AutoModel
     from opencc import OpenCC
-
     import torch
-    trt = _use_trt and torch.cuda.is_available()
-    print(f"[tts] CUDA available={torch.cuda.is_available()}  load_trt={trt}", flush=True)
-    cosyvoice = AutoModel(model_dir=MODEL_DIR, load_trt=trt, fp16=trt)
-    # imood 的 LLM 系統提示詞要求一律回覆繁體中文，但 CosyVoice-300M-SFT
-    # 的文字前處理主要是針對簡體中文訓練的，餵繁體字進去時，字典裡沒有的
-    # 字會念出明顯不像中文的音。這裡只轉換「要合成的文字」，前端顯示的
-    # 文字不受影響，使用者看到的還是繁體。
+
+    cuda = torch.cuda.is_available()
+    load_vllm = LOAD_VLLM and cuda
+    load_trt = LOAD_TRT and cuda
+    load_jit = LOAD_JIT and cuda
+    fp16 = FP16 and cuda
+    print(
+        f"[tts] model={MODEL_DIR}\n"
+        f"[tts] v2={_IS_V2} cuda={cuda} vllm={load_vllm} trt={load_trt} "
+        f"jit={load_jit} fp16={fp16}",
+        flush=True,
+    )
+
+    kwargs = dict(model_dir=MODEL_DIR, load_trt=load_trt, load_jit=load_jit, fp16=fp16)
+    if _IS_V2:
+        kwargs["load_vllm"] = load_vllm
+        if load_vllm:
+            # vLLM 需要在 import cosyvoice 前把 CosyVoice2ForCausalLM 註冊進去
+            from vllm import ModelRegistry
+            from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
+
+            ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
+
+    cosyvoice = AutoModel(**kwargs)
+
+    if _IS_V2:
+        # 註冊 zero-shot 參考語者：抽一次 prompt 特徵存進 spk2info，之後每個
+        # 請求用 zero_shot_spk_id 引用，不重抽（省首塊延遲）。
+        print(f"[tts] registering zero-shot speaker from {PROMPT_WAV}", flush=True)
+        cosyvoice.add_zero_shot_spk(PROMPT_TEXT, PROMPT_WAV, ZERO_SHOT_SPK_ID)
+
+    # imood 的 LLM 一律回覆繁體中文，但 CosyVoice 的文字前處理偏簡體，餵繁體
+    # 進去時字典沒有的字會念出不像中文的音。這裡只轉「要合成的文字」，前端
+    # 顯示的文字不受影響，使用者看到的還是繁體。
     _t2s = OpenCC("t2s")
+    print("[tts] ready", flush=True)
 
 
 class SynthesizeRequest(BaseModel):
@@ -71,7 +135,7 @@ class SynthesizeRequest(BaseModel):
 
 
 def _pcm16_bytes(speech_tensor, resampler) -> bytes:
-    """CosyVoice tensor（22050Hz float, shape [1, N]）-> 16kHz PCM16 bytes。"""
+    """CosyVoice tensor（22050/24000Hz float, shape [1, N]）-> 16kHz PCM16 bytes。"""
     import numpy as np
 
     resampled = resampler(speech_tensor)  # [1, M] @ TARGET_SAMPLE_RATE
@@ -80,12 +144,21 @@ def _pcm16_bytes(speech_tensor, resampler) -> bytes:
     return pcm16.tobytes()
 
 
+def _model_chunks(text: str):
+    """依後端選 inference 方式，逐段 yield CosyVoice 原生輸出（dict）。"""
+    if _IS_V2:
+        yield from cosyvoice.inference_zero_shot(
+            text, "", "", zero_shot_spk_id=ZERO_SHOT_SPK_ID, stream=True
+        )
+    else:
+        yield from cosyvoice.inference_sft(text, SPEAKER, stream=True)
+
+
 def _synthesize_chunks(text: str) -> Iterator[bytes]:
     """
-    逐段呼叫 CosyVoice stream=True，把每段輸出 resample 成 16kHz，
-    再切成固定 320ms 的 PCM16 區塊依序 yield 出去。CosyVoice 原生一段
-    是 ~1.7-2 秒（見 docs/tts-prototype-notes.md 的實測數字），比 JoyGen
-    要的 320ms 粗很多，所以切塊這一步是必要的，不能直接轉發原生分段。
+    逐段呼叫 CosyVoice stream=True，把每段輸出 resample 成 16kHz，再切成固定
+    320ms 的 PCM16 區塊依序 yield。CosyVoice 原生一段 ~1.7-2 秒，比 JoyGen 要
+    的 320ms 粗很多，所以切塊這一步是必要的，不能直接轉發原生分段。
     """
     import torchaudio
 
@@ -95,7 +168,7 @@ def _synthesize_chunks(text: str) -> Iterator[bytes]:
 
     text = _t2s.convert(text)
     carry = b""  # 上一個 model chunk 切剩、不足 320ms 的尾巴
-    for out in cosyvoice.inference_sft(text, SPEAKER, stream=True):
+    for out in _model_chunks(text):
         pcm = carry + _pcm16_bytes(out["tts_speech"], resampler)
         n_full = len(pcm) // CHUNK_BYTES
         for i in range(n_full):
@@ -118,4 +191,9 @@ def synthesize(req: SynthesizeRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": cosyvoice is not None}
+    return {
+        "status": "ok",
+        "model_loaded": cosyvoice is not None,
+        "model_dir": MODEL_DIR,
+        "backend": "cosyvoice2-zeroshot" if _IS_V2 else "cosyvoice-300m-sft",
+    }

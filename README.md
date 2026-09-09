@@ -45,10 +45,11 @@ venv\Scripts\python -m pip install -r requirements-gpu.txt   # nvidia-cudnn / cu
 - **LLM**：Windows 沒有 llama-cpp-python 的 GPU 預編 wheel（abetlen 只出到
   0.2.68），要 GPU 得自己 source build。Qwen 1.5B 純 CPU 本來就 ~1s，除非
   換大模型否則不值得。
-- **TTS（CosyVoice）**：torch 部分只要環境有 CUDA 就自動上 GPU（不用設定）。
-  但 Windows torch 沒 flash-attn，CosyVoice-1 也沒 vLLM，RTF 卡在 ~1.5×；
-  TensorRT（`TTS_USE_TRT=1`）實測也救不了（瓶頸是 AR decoder 不是 diffusion
-  decoder）。要更快得在 Linux/WSL 跑 tts_service。見 `docs/gpu-notes.md`。
+- **TTS**：正式跑 **CosyVoice2-0.5B + vLLM**，在 **WSL2** 起 `tts_service.py`
+  （vLLM 沒有 Windows CUDA 版），`server.py` 在 Windows 跨邊界打 `localhost:8001`。
+  首塊 ~1.0s、RTF ~0.24×。啟動指令與 WSL 環境見「語音回覆（TTS）」一節與
+  `docs/gpu-notes.md`。舊的 CosyVoice-300M-SFT（Windows `cosyvoice` conda env）
+  仍可用作後備——`tts_service.py` 靠 `COSYVOICE_MODEL_DIR` 自動判後端。
 
 啟動後，直接用瀏覽器打開 `demo-imood-dashboard.html` 即可（它會呼叫
 `http://localhost:8000/api/chat/stream` 做逐字 streaming 顯示，連不上時
@@ -58,10 +59,24 @@ venv\Scripts\python -m pip install -r requirements-gpu.txt   # nvidia-cudnn / cu
 
 ## 語音回覆（TTS，CosyVoice，選用）
 
-回覆文字轉語音是另一個獨立 process（`tts_service.py`），跑在另一個
-conda 環境，透過 HTTP 被 `server.py` 呼叫（見 `tts_client.py`）。原因、
-完整環境建置步驟、已知限制都記在 `docs/tts-prototype-notes.md`，這裡
-只列啟動指令：
+回覆文字轉語音是另一個獨立 process（`tts_service.py`），透過 HTTP 被
+`server.py` 呼叫（見 `tts_client.py`）。原因、完整環境建置步驟、已知限制
+記在 `docs/tts-prototype-notes.md`（原型）與 `docs/gpu-notes.md`（CosyVoice2
+遷移），這裡只列啟動指令。
+
+**正式：CosyVoice2-0.5B + vLLM（WSL2）** —— 首塊 ~1.0s、RTF ~0.24×。
+WSL env `cosyvoice_vllm` 的建置見 `docs/gpu-notes.md`。
+
+```bash
+# 在 wsl -d Ubuntu-24.04 -u root 裡
+cd /mnt/c/imood-backend
+COSYVOICE_REPO=/root/CosyVoice \
+COSYVOICE_MODEL_DIR=/root/CosyVoice/pretrained_models/CosyVoice2-0.5B \
+MODELSCOPE_OFFLINE=1 \
+/root/miniconda3/envs/cosyvoice_vllm/bin/python -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
+```
+
+**後備：CosyVoice-300M-SFT（Windows）** —— 首塊 ~4s、RTF ~1.5×。
 
 ```bash
 C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001

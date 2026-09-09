@@ -3,6 +3,10 @@
 測試機：Intel i7-8700 (6C/12T) + RTX 4090 24GB + 64GB RAM，Windows 11。
 輸入：`demo-assets/sample-zh.wav`（6.05s），以真實麥克風速率餵 `/ws/audio`，每階段 3 次平均。
 
+> **2026-09-09 更新**：TTS 已換成 **CosyVoice2-0.5B + vLLM**（跑在 WSL2），
+> `inference_zero_shot` 首塊 ~4s → **~1.0s**、RTF ~1.55× → **~0.24×**。
+> 詳見最下方「CosyVoice2-0.5B + vLLM 遷移實測」。
+
 ## 使用者「講完話」後的等待時間
 
 | 事件 | 全 CPU/預設 | + ASR GPU | + TTS TensorRT |
@@ -39,7 +43,7 @@
 
 1. ~~**WSL2 / Linux 跑 tts_service**~~ —— **實測無效，見下節**。
 2. 換非 autoregressive 的中文 TTS 引擎（F5-TTS / MeloTTS / Kokoro，GPU RTF <0.1×，但音色/韻律不同）。
-3. **CosyVoice2-0.5B + vLLM**（`load_vllm=True`）——把 LLM 換成 Qwen2 backbone，vLLM 才吃得到。要下載 CosyVoice2 模型、裝 vllm、改 `tts_service.py`（CosyVoice2 用 `inference_zero_shot`/`inference_instruct2`，要 prompt wav 當語者，沒有內建「中文女」SFT 語者），音色會變。這是真正有機會的路，但是一個獨立的中型任務。
+3. ~~**CosyVoice2-0.5B + vLLM**（`load_vllm=True`）~~ —— **2026-09-09 做了，成功，見最下方「CosyVoice2-0.5B + vLLM 遷移實測」。首塊 4s → ~1s、RTF ~0.24×。**
 4. ~~`server.py` 的 `_stream_tts_to_ws` 改逐句合成~~ —— **實測反而更慢，見下節**。
 5. 調低 CosyVoice flow decoder 的 ODE 步數（快一點、品質略降）。
 
@@ -82,3 +86,51 @@ env `/root/miniconda3/envs/cosyvoice`（Py3.10），repo+模型 `/root/CosyVoice
 - 這條路只有在「回覆很長（4+ 句）且 LLM 夠慢」時才會贏；imood 不是這種 workload。
 - 真正的瓶頸是 `reply_done → audio_first` 的 ~4s，就是 CosyVoice-300M 生第一塊的時間，
   逐句切不動它。要壓這個只能換模型（第 2、3 點）或砍 ODE 步數（第 5 點）。
+
+## CosyVoice2-0.5B + vLLM 遷移實測（2026-09-09）→ ✅ 首塊 4s → ~1s
+
+把 `tts_service.py` 從 CosyVoice-300M-SFT 換成 **CosyVoice2-0.5B**，LLM backbone 是
+Qwen2，用 **vLLM**（`load_vllm=True`）加速 AR 語音 token decoder。vLLM 沒有 Windows
+CUDA 版，所以這條路**跑在 WSL2**（`server.py` 仍在 Windows，跨邊界打 `localhost:8001`，
+WSL2 NAT 會自動轉埠，實測 Windows→WSL 直接通）。
+
+`inference_zero_shot`（`/synthesize`）client 端實測，RTX 4090，5–7s 的中文回覆：
+
+| 指標 | CosyVoice-300M-SFT | CosyVoice2-0.5B + vLLM |
+|---|---|---|
+| 首塊延遲（暖機後） | ~4 s | **~1.0 s**（1.0–1.3s） |
+| 整段合成時間 | ~9 s | **~1.4 s** |
+| RTF | ~1.55× | **~0.24×**（0.21–0.28） |
+| 冷啟動第一次請求 | — | ~3.1s（之後穩定 ~1s） |
+
+- **語者**：CosyVoice2 沒有內建 SFT 語者，改 zero-shot：啟動時餵一段 3–10s 參考音檔
+  註冊成 `imood_default`，之後每個請求引用該 id（不重抽 prompt 特徵）。目前用 CosyVoice
+  repo 自帶的 `asset/zero_shot_prompt.wav`（中文女聲）。換音色 = 換 `TTS_PROMPT_WAV` +
+  `TTS_PROMPT_TEXT` 兩個環境變數，不用改程式。
+- **繁→簡**：`_t2s`（OpenCC t2s）保留，CosyVoice2 中文前端雖然比 v1 好，但保險起見先留著。
+- **首次啟動**會自動 `export_cosyvoice2_vllm`（產生 `{model}/vllm/` HF 權重）+ build
+  TensorRT engine（`flow.decoder.estimator.fp16.mygpu.plan`，~166MB，一次性 ~3–4 分鐘），
+  之後快取，暖啟動 ~30–40s。
+- **GPU 佔用**：vLLM `gpu_memory_utilization=0.2`（CosyVoice 寫死）+ flow/hift/trt ≈ 9GB。
+  跟 faster-whisper ASR（~1–2GB）同卡沒問題，24GB 還很空。
+
+### WSL 環境（`wsl -d Ubuntu-24.04 -u root`）
+
+- conda env **`cosyvoice_vllm`** = clone 自 `cosyvoice` + `pip install vllm==0.9.0
+  transformers==4.51.3 numpy==1.26.4`（照 CosyVoice README；vllm 會把 torch 2.3.1 → 2.7.0）。
+  clone 前要 `conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main`
+  （和 `/pkgs/r`）。
+- 模型：`iic/CosyVoice2-0.5B` → `/root/CosyVoice/pretrained_models/CosyVoice2-0.5B`（~5.3GB，
+  含 `CosyVoice-BlankEN` Qwen backbone）。
+- 啟動：
+  ```
+  cd /mnt/c/imood-backend
+  COSYVOICE_REPO=/root/CosyVoice \
+  COSYVOICE_MODEL_DIR=/root/CosyVoice/pretrained_models/CosyVoice2-0.5B \
+  MODELSCOPE_OFFLINE=1 \
+  /root/miniconda3/envs/cosyvoice_vllm/bin/python -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
+  ```
+- `tts_service.py` 靠 `COSYVOICE_MODEL_DIR` 有沒有 `cosyvoice2.yaml` 自動判後端；指回
+  300M-SFT（Windows `cosyvoice` env）舊路徑仍可用。
+- 已知無害的 pip 衝突：`grpcio-tools` 要舊 protobuf、`openai-whisper` 要 triton<3——
+  這兩個套件 `tts_service` 的 zero-shot 路徑都用不到。
