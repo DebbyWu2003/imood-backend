@@ -1,0 +1,5 @@
+# deploy/ files are consumed inside WSL/Linux — keep LF regardless of core.autocrlf
+deploy/*.sh        text eol=lf
+deploy/*.service   text eol=lf
+deploy/*.env       text eol=lf
+*.sh               text eol=lf
