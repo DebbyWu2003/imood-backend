@@ -10,6 +10,9 @@
 #   venv\Scripts\python scripts\asr_eval.py samples\tts\manifest.jsonl --model small
 #   venv\Scripts\python scripts\asr_eval.py samples\tts\manifest.jsonl --model medium
 #
+# device / compute 預設 auto：有 CUDA 就用 cuda+float16（跟正式服務一致），
+# 否則 cpu+int8。要固定比對基準：--device cpu，或 --device cuda 強制上 GPU。
+#
 # CER = 字元錯誤率（編輯距離 / 參考字數），比對前會去掉標點與空白。
 # ============================================================
 
@@ -42,6 +45,21 @@ def normalize(s: str) -> str:
     return _to_simp(NON_WORD.sub("", s.strip()).lower())
 
 
+def resolve_device(device: str, compute: str) -> tuple[str, str]:
+    """跟 voice_asr.Transcriber 一樣的規則：device=auto 有 CUDA 就用 cuda，
+    compute=auto 時 GPU→float16、CPU→int8。"""
+    if device == "auto":
+        try:
+            import ctranslate2
+
+            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+        except Exception:
+            device = "cpu"
+    if compute == "auto":
+        compute = "float16" if device == "cuda" else "int8"
+    return device, compute
+
+
 def edit_distance(a: str, b: str) -> int:
     prev = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
@@ -57,7 +75,8 @@ def main() -> None:
     ap.add_argument("manifest", type=Path)
     ap.add_argument("--model", default="small")
     ap.add_argument("--lang", default="zh")
-    ap.add_argument("--compute", default="int8")
+    ap.add_argument("--device", default="auto", help="auto | cpu | cuda（auto = 有 CUDA 就用，跟正式服務一致）")
+    ap.add_argument("--compute", default="auto", help="auto | int8 | float16 ...（auto: GPU→float16, CPU→int8）")
     ap.add_argument("--beam", type=int, default=5)
     ap.add_argument("--no-vad", action="store_true")
     ap.add_argument("--prompt", default="以下是台灣人的日常對話，請以繁體中文輸出。")
@@ -68,9 +87,11 @@ def main() -> None:
 
     from faster_whisper import WhisperModel
 
+    device, compute = resolve_device(args.device, args.compute)
+
     t0 = time.perf_counter()
-    model = WhisperModel(args.model, device="cpu", compute_type=args.compute)
-    print(f"[load] {args.model}/{args.compute}  {time.perf_counter() - t0:.1f}s\n")
+    model = WhisperModel(args.model, device=device, compute_type=compute)
+    print(f"[load] {args.model} {device}/{compute}  {time.perf_counter() - t0:.1f}s\n")
 
     tot_err = tot_ref = tot_audio = tot_infer = 0.0
     for r in rows:

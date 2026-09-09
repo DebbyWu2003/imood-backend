@@ -15,7 +15,8 @@
 #
 # 常用參數：
 #   --model    tiny | base | small | medium  (預設 small，中文優先驗證)
-#   --compute  int8 | int8_float32 | float32  (CPU 建議 int8)
+#   --device   auto | cpu | cuda  (預設 auto：有 CUDA 就用，跟正式服務一致)
+#   --compute  auto | int8 | float16 ...  (auto: GPU→float16, CPU→int8)
 #   --lang     預設 zh；設 auto 讓模型自己偵測
 #   --no-vad   關掉內建 VAD filter（比較「有無 VAD」對延遲/斷句的影響）
 #
@@ -38,13 +39,28 @@ except Exception:
 DEFAULT_ZH_PROMPT = "以下是台灣人的日常對話，請以繁體中文輸出。"
 
 
+def resolve_device(device: str, compute: str) -> tuple[str, str]:
+    """跟 voice_asr.Transcriber 一樣的規則：device=auto 有 CUDA 就用 cuda，
+    compute=auto 時 GPU→float16、CPU→int8。"""
+    if device == "auto":
+        try:
+            import ctranslate2
+
+            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+        except Exception:
+            device = "cpu"
+    if compute == "auto":
+        compute = "float16" if device == "cuda" else "int8"
+    return device, compute
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="faster-whisper 單次中文辨識 demo")
     ap.add_argument("audio", type=Path, help="要辨識的音訊檔 (wav/mp3/m4a 皆可，內部用 ffmpeg 解碼)")
     ap.add_argument("--model", default="small", help="模型大小 (預設 small)")
     ap.add_argument("--lang", default="zh", help="語言代碼，預設 zh；auto = 自動偵測")
-    ap.add_argument("--device", default="cpu", help="cpu 或 cuda (預設 cpu)")
-    ap.add_argument("--compute", default="int8", help="量化型別 (預設 int8)")
+    ap.add_argument("--device", default="auto", help="auto | cpu | cuda (預設 auto：有 CUDA 就用，跟正式服務一致)")
+    ap.add_argument("--compute", default="auto", help="auto | int8 | float16 ... (auto: GPU→float16, CPU→int8)")
     ap.add_argument("--beam", type=int, default=5, help="beam size (預設 5)")
     ap.add_argument("--no-vad", action="store_true", help="關掉內建 VAD filter")
     ap.add_argument("--prompt", default=DEFAULT_ZH_PROMPT, help="initial_prompt；設空字串可關掉")
@@ -55,10 +71,12 @@ def main() -> None:
 
     from faster_whisper import WhisperModel
 
+    device, compute = resolve_device(args.device, args.compute)
+
     t0 = time.perf_counter()
-    model = WhisperModel(args.model, device=args.device, compute_type=args.compute)
+    model = WhisperModel(args.model, device=device, compute_type=compute)
     load_s = time.perf_counter() - t0
-    print(f"[load]  model={args.model} device={args.device} compute={args.compute}  ->  {load_s:.2f}s")
+    print(f"[load]  model={args.model} device={device} compute={compute}  ->  {load_s:.2f}s")
 
     language = None if args.lang == "auto" else args.lang
 
