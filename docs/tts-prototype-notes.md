@@ -8,7 +8,7 @@
 背景與架構決策見 `docs/streaming-architecture-analysis.md`（TTS 選型原本
 因為優先做 voice-only 而暫緩，這次是先自己動手做原型驗證）。
 
-## 為什麼是獨立環境，不是塞進 imood-backend 主 venv
+## 為什麼是獨立環境，不是塞進 imood-voice 主 venv
 
 `server.py` 跑在專案原本的 Python 3.14（`llama-cpp-python`、`faster-whisper`
 那一套）。CosyVoice 需要 PyTorch + `pynini`（Windows 上 `pynini` 只能透過
@@ -116,7 +116,7 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
 
 ## 對應的程式碼
 
-- `tts_service.py`（imood-backend repo 根目錄，但用 `cosyvoice` conda env
+- `tts_service.py`（imood-voice repo 根目錄，但用 `cosyvoice` conda env
   執行）：FastAPI app，`POST /synthesize` 逐塊吐 16kHz/mono/16-bit PCM。
 - `tts_client.py`：`server.py` 用來呼叫 `tts_service` 的 async client。
 - `server.py` 的 `_stream_tts_to_ws()`：`/ws/audio` 裡接 TTS 的地方，
@@ -126,10 +126,10 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
 ## 啟動方式
 
 ```
-# 1. TTS 服務（cosyvoice conda env，在 imood-backend 目錄下執行）
+# 1. TTS 服務（cosyvoice conda env，在 imood-voice 目錄下執行）
 C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
 
-# 2. 主服務（imood-backend 主 venv，照原本方式）
+# 2. 主服務（imood-voice 主 venv，照原本方式）
 uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 ```
 

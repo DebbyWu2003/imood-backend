@@ -94,7 +94,7 @@ GB，故意排除在版控外（見下一節）。
 排除在外（單靠 `git clone` 拉不到，見 `.gitignore`），每台新機器都要照
 下面順序重新建置一次：
 
-1. **Clone repo**：`git clone https://github.com/DebbyWu2003/imood-backend C:\imood-backend`
+1. **Clone repo**：`git clone https://github.com/DebbyWu2003/imood-voice C:\imood-backend`
    （建議路徑保持 `C:\imood-backend`，`tts_service.py` 裡 `COSYVOICE_REPO`
    的預設值是寫死這個路徑；要放別的路徑也可以，改用環境變數
    `COSYVOICE_REPO` 覆蓋即可，不用動程式碼）
