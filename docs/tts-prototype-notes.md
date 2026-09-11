@@ -18,13 +18,13 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
 
 ## 環境建置步驟（實際跑過、成功的版本）
 
-1. **Miniconda**：裝到 `C:\imood-backend\miniconda3`（**不要**裝在使用者
+1. **Miniconda**：裝到 `C:\imood_project\imood-voice\miniconda3`（**不要**裝在使用者
    家目錄底下，這台機器的使用者名稱含中文字元，Miniconda 的 NSIS 安裝程式
    對非 ASCII 路徑會直接安裝失敗，退而求其次選一個全英數字路徑）。
    `winget install Anaconda.Miniconda3` 會裝到 `C:\Users\<user>\miniconda3`，
    不是這裡要的路徑；改用官方 installer 靜默裝到指定位置：
    ```
-   Miniconda3-latest-Windows-x86_64.exe /S /InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /D=C:\imood-backend\miniconda3
+   Miniconda3-latest-Windows-x86_64.exe /S /InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /D=C:\imood_project\imood-voice\miniconda3
    ```
 2. 建立 conda 環境（新版 conda 對 `repo.anaconda.com` 預設頻道會擋
    `CondaToSNonInteractiveError`；全程加 `-c conda-forge --override-channels`
@@ -33,11 +33,11 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
    conda create -n cosyvoice -c conda-forge --override-channels python=3.10 -y
    conda install -n cosyvoice -c conda-forge --override-channels pynini==2.1.5 -y
    ```
-3. Clone CosyVoice（放在 `C:\imood-backend\CosyVoice`；雖然實體上在 repo
+3. Clone CosyVoice（放在 `C:\imood_project\imood-voice\CosyVoice`；雖然實體上在 repo
    目錄底下，但已加進 `.gitignore` 不進版控，模型檔案加起來好幾 GB）：
    ```
-   git clone --depth 1 https://github.com/FunAudioLLM/CosyVoice.git C:\imood-backend\CosyVoice
-   cd C:\imood-backend\CosyVoice
+   git clone --depth 1 https://github.com/FunAudioLLM/CosyVoice.git C:\imood_project\imood-voice\CosyVoice
+   cd C:\imood_project\imood-voice\CosyVoice
    git submodule update --init --recursive   # 補 third_party/Matcha-TTS
    ```
    （2026-09 重建時 upstream `requirements.txt` 已比本文件當初新一版——多了
@@ -127,7 +127,7 @@ conda 裝，pip 裝不起來），版本也只支援到 Python 3.10。兩邊裝�
 
 ```
 # 1. TTS 服務（cosyvoice conda env，在 imood-voice 目錄下執行）
-C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
+C:\imood_project\imood-voice\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
 
 # 2. 主服務（imood-voice 主 venv，照原本方式）
 uvicorn server:app --host 0.0.0.0 --port 8000 --reload

@@ -1,8 +1,8 @@
 # Run once in an ELEVATED PowerShell (Run as administrator):
-#   powershell -ExecutionPolicy Bypass -File C:\imood-backend\deploy\register-windows-boot-task.ps1
+#   powershell -ExecutionPolicy Bypass -File C:\imood_project\imood-voice\deploy\register-windows-boot-task.ps1
 #
-# Registers a logon task that holds a WSL2 client open (`tail -f /dev/null`),
-# which keeps the Ubuntu-24.04 VM — and therefore the imood-tts systemd
+# Registers a logon task that holds a WSL2 client open (`sleep infinity` -- note
+# that `tail -f /dev/null` exits 1 under --exec), which keeps the Ubuntu-24.04 VM — and therefore the imood-tts systemd
 # service — running from the moment you sign in. Without it, WSL only runs
 # while a terminal is open and the service stops when the VM idles out.
 #

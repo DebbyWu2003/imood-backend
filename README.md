@@ -9,7 +9,7 @@
 ## 啟動步驟
 
 ```bash
-cd imood-backend
+cd imood-voice
 python -m venv venv            # Python 3.12 實測 OK（3.14 也行，但預編 wheel 常落後）
 
 #  llama-cpp-python 的 source build 在 Windows 會因路徑過長失敗，要靠預編 CPU
@@ -69,7 +69,7 @@ WSL env `cosyvoice_vllm` 的建置見 `docs/gpu-notes.md`。
 
 ```bash
 # 在 wsl -d Ubuntu-24.04 -u root 裡
-cd /mnt/c/imood-backend
+cd /mnt/c/imood_project/imood-voice
 COSYVOICE_REPO=/root/CosyVoice \
 COSYVOICE_MODEL_DIR=/root/CosyVoice/pretrained_models/CosyVoice2-0.5B \
 MODELSCOPE_OFFLINE=1 \
@@ -79,7 +79,7 @@ MODELSCOPE_OFFLINE=1 \
 **後備：CosyVoice-300M-SFT（Windows）** —— 首塊 ~4s、RTF ~1.5×。
 
 ```bash
-C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
+C:\imood_project\imood-voice\miniconda3\envs\cosyvoice\python.exe -m uvicorn tts_service:app --host 0.0.0.0 --port 8001
 ```
 
 `tts_service` 沒啟動或連不上也沒關係——`/ws/audio` 的文字回覆流程不受
@@ -94,18 +94,18 @@ GB，故意排除在版控外（見下一節）。
 排除在外（單靠 `git clone` 拉不到，見 `.gitignore`），每台新機器都要照
 下面順序重新建置一次：
 
-1. **Clone repo**：`git clone https://github.com/DebbyWu2003/imood-voice C:\imood-backend`
-   （建議路徑保持 `C:\imood-backend`，`tts_service.py` 裡 `COSYVOICE_REPO`
+1. **Clone repo**：`git clone https://github.com/DebbyWu2003/imood-voice C:\imood_project\imood-voice`
+   （建議路徑保持 `C:\imood_project\imood-voice`，`tts_service.py` 裡 `COSYVOICE_REPO`
    的預設值是寫死這個路徑；要放別的路徑也可以，改用環境變數
    `COSYVOICE_REPO` 覆蓋即可，不用動程式碼）
 2. **主服務 venv + LLM 模型**：照上面「啟動步驟」，分兩步裝依賴
    （llama-cpp-python 走預編 CPU wheel；import 報缺 `llama.dll` 就
    `winget install Microsoft.VCRedist.2015+.x64`）、下載 Qwen GGUF 模型到 `models/`
 3. **TTS 環境**：照 `docs/tts-prototype-notes.md` 完整走一次——裝
-   Miniconda 到 `C:\imood-backend\miniconda3`（**帳號名稱含中文/非 ASCII
+   Miniconda 到 `C:\imood_project\imood-voice\miniconda3`（**帳號名稱含中文/非 ASCII
    字元的機器，NSIS 安裝程式會直接裝失敗**，要選純英數路徑；`winget install
    Anaconda.Miniconda3` 會裝到家目錄不是這個路徑，要用官方 installer 加
-   `/D=C:\imood-backend\miniconda3` 靜默安裝）、建 `cosyvoice` conda env
+   `/D=C:\imood_project\imood-voice\miniconda3` 靜默安裝）、建 `cosyvoice` conda env
    （新版 conda 對預設頻道會擋 ToS，全程加 `-c conda-forge --override-channels`
    繞過）、clone CosyVoice + submodule、裝依賴（含 `openai-whisper` build
    繞過法、`opencc-python-reimplemented`）、下載 CosyVoice-300M-SFT 預訓練

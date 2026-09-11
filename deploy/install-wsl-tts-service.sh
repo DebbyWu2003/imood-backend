@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install the imood TTS service under systemd inside WSL2 (Ubuntu-24.04).
 # Run from WSL as root:
-#   sudo bash /mnt/c/imood-backend/deploy/install-wsl-tts-service.sh
+#   sudo bash /mnt/c/imood_project/imood-voice/deploy/install-wsl-tts-service.sh
 #
 # Idempotent: re-run after editing imood-tts.service / imood-tts.env.
 set -euo pipefail

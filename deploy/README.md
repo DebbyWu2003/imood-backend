@@ -34,13 +34,13 @@ Until you sign out/in after registering it, keep any WSL terminal window open.
 **1. Inside WSL** (Ubuntu-24.04), as root — needs `systemd=true` in `/etc/wsl.conf`:
 
 ```bash
-sudo bash /mnt/c/imood-backend/deploy/install-wsl-tts-service.sh
+sudo bash /mnt/c/imood_project/imood-voice/deploy/install-wsl-tts-service.sh
 ```
 
 **2. On Windows**, in an **elevated** PowerShell (once):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File C:\imood-backend\deploy\register-windows-boot-task.ps1
+powershell -ExecutionPolicy Bypass -File C:\imood_project\imood-voice\deploy\register-windows-boot-task.ps1
 ```
 
 The script registers the task **and starts it now**. Confirm it stuck:

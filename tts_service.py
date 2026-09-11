@@ -1,7 +1,7 @@
 # ============================================================
 # tts_service.py —— CosyVoice 中文語音合成服務（獨立 process）
 #
-# 這個檔案**不**跑在 imood-backend 主 venv（Python 3.14）裡，因為 CosyVoice
+# 這個檔案**不**跑在 imood-voice 主 venv（Python 3.14）裡，因為 CosyVoice
 # 需要 PyTorch + pynini，跟主 venv 的 llama-cpp-python 環境不相容。
 #
 # 兩種後端，用 COSYVOICE_MODEL_DIR 指到哪個模型就跑哪個：
@@ -21,7 +21,7 @@
 #   2) CosyVoice-300M-SFT（舊路徑，Windows cosyvoice conda env）
 #      - 內建「中文女」SFT 語者，inference_sft。vLLM 對 v1 無效。
 #      啟動：
-#        C:\imood-backend\miniconda3\envs\cosyvoice\python.exe -m uvicorn \
+#        C:\imood_project\imood-voice\miniconda3\envs\cosyvoice\python.exe -m uvicorn \
 #        tts_service:app --host 0.0.0.0 --port 8001
 #
 # server.py 透過 tts_client.py 呼叫 /synthesize，HTTP 通訊、兩個 process
@@ -38,7 +38,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # CosyVoice 是外部 checkout，不進這個 repo（跟 models/*.gguf 一樣太大）。
-COSYVOICE_REPO = os.environ.get("COSYVOICE_REPO", r"C:\imood-backend\CosyVoice")
+COSYVOICE_REPO = os.environ.get("COSYVOICE_REPO", r"C:\imood_project\imood-voice\CosyVoice")
 sys.path.insert(0, COSYVOICE_REPO)
 sys.path.insert(0, os.path.join(COSYVOICE_REPO, "third_party", "Matcha-TTS"))
 
@@ -102,7 +102,7 @@ TARGET_SAMPLE_RATE = 16000
 CHUNK_MS = 320  # 對齊 JoyGen diffusion decoder 8-frame batch @25fps
 CHUNK_BYTES = int(TARGET_SAMPLE_RATE * (CHUNK_MS / 1000) * 2)  # 16-bit = 2 bytes/sample
 
-app = FastAPI(title="imood-backend TTS service (CosyVoice)")
+app = FastAPI(title="imood-voice TTS service (CosyVoice)")
 
 cosyvoice = None  # startup 時載入一次，避免每個請求都要重載模型
 _t2s = None       # 繁體轉簡體，見下方 load_model() 的說明

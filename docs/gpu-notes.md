@@ -40,7 +40,7 @@
 - `server.py` 載入時自動偵測（`_resolve_n_gpu_layers()`，照 `voice_asr` 的 `_resolve_device()`）：
   `llama_supports_gpu_offload()` 為真就 `n_gpu_layers=-1` 整包 offload，否則 CPU。
   `LLM_DEVICE=cpu` 或 `LLM_N_GPU_LAYERS=<n>` 可覆寫。
-- **裝法**（主 venv，`C:\imood-backend\venv`）：
+- **裝法**（主 venv，`C:\imood_project\imood-voice\venv`）：
   ```
   venv\Scripts\python -m pip install --force-reinstall --no-cache-dir --no-deps \
     llama-cpp-python==0.3.35 \
@@ -88,7 +88,7 @@ torch 2.3.1+cu121、同一顆 RTX 4090）跑，直接量 `inference_sft` streami
 
 WSL 環境路徑（若之後要試 CosyVoice2）：`wsl -d Ubuntu-24.04 -u root`，
 env `/root/miniconda3/envs/cosyvoice`（Py3.10），repo+模型 `/root/CosyVoice`，
-啟動 `COSYVOICE_REPO=/root/CosyVoice MODELSCOPE_OFFLINE=1 /root/miniconda3/envs/cosyvoice/bin/python -m uvicorn tts_service:app --host 0.0.0.0 --port 8001`（在 `/mnt/c/imood-backend` 下）。
+啟動 `COSYVOICE_REPO=/root/CosyVoice MODELSCOPE_OFFLINE=1 /root/miniconda3/envs/cosyvoice/bin/python -m uvicorn tts_service:app --host 0.0.0.0 --port 8001`（在 `/mnt/c/imood_project/imood-voice` 下）。
 
 ## 逐句 TTS 實測（2026-09-08）→ ❌ 反而更慢
 
@@ -144,7 +144,7 @@ WSL2 NAT 會自動轉埠，實測 Windows→WSL 直接通）。
   含 `CosyVoice-BlankEN` Qwen backbone）。
 - 啟動：
   ```
-  cd /mnt/c/imood-backend
+  cd /mnt/c/imood_project/imood-voice
   COSYVOICE_REPO=/root/CosyVoice \
   COSYVOICE_MODEL_DIR=/root/CosyVoice/pretrained_models/CosyVoice2-0.5B \
   MODELSCOPE_OFFLINE=1 \
