@@ -42,6 +42,39 @@ COSYVOICE_REPO = os.environ.get("COSYVOICE_REPO", r"C:\imood_project\imood-voice
 sys.path.insert(0, COSYVOICE_REPO)
 sys.path.insert(0, os.path.join(COSYVOICE_REPO, "third_party", "Matcha-TTS"))
 
+# --- 讓 wetext 從本地快取載入，不要連 modelscope ------------------------------
+# CosyVoice 的文字正規化（把「50%」「3:20」「23.5」變成口語中文）走 wetext。
+# wetext.Normalizer 沒拿到明確的 tagger/verbalizer 路徑時，會呼叫 modelscope 的
+# snapshot_download() 做版本檢查——即使 FST 快取早就在 ~/.cache/modelscope 底下。
+# 匿名請求前幾次會過，很快就被 modelscope 限速擋成 403，而 CosyVoice 的
+# cli/frontend.py 用裸 except: 把失敗吞掉，靜默降級成 text_frontend=''。結果是
+# 正規化整個不做、只留一行 "no frontend is avaliable" 的 log，數字和時間就原樣
+# 送進聲學模型念出來。
+#
+# modelscope 1.20.0 沒有任何環境變數能開 local_files_only（MODELSCOPE_OFFLINE
+# 在它的原始碼裡根本不存在，設了也沒用），所以只能在這裡補上預設值。必須在
+# CosyVoice 被 import 之前跑：wetext 是 `from modelscope import snapshot_download`。
+#
+# 先試本地、失敗才連網，所以全新環境（還沒有快取）仍然抓得到，不會倒退。
+try:
+    import modelscope as _modelscope
+
+    _ms_snapshot_download = _modelscope.snapshot_download
+
+    def _snapshot_download_local_first(model_id, *args, **kwargs):
+        if "local_files_only" not in kwargs:
+            try:
+                return _ms_snapshot_download(
+                    model_id, *args, local_files_only=True, **kwargs
+                )
+            except Exception:
+                pass  # 沒有快取 → 照原本的方式連網抓一次
+        return _ms_snapshot_download(model_id, *args, **kwargs)
+
+    _modelscope.snapshot_download = _snapshot_download_local_first
+except ImportError:
+    pass  # 沒有 modelscope 的話 CosyVoice 本來就跑不起來，留給它自己報錯
+
 # 指到哪個模型就跑哪個後端。預設 CosyVoice2-0.5B。
 _DEFAULT_MODEL = os.path.join(COSYVOICE_REPO, "pretrained_models", "CosyVoice2-0.5B")
 MODEL_DIR = os.environ.get("COSYVOICE_MODEL_DIR", _DEFAULT_MODEL)
@@ -149,6 +182,20 @@ def load_model():
     # 進去時字典沒有的字會念出不像中文的音。這裡只轉「要合成的文字」，前端
     # 顯示的文字不受影響，使用者看到的還是繁體。
     _t2s = OpenCC("t2s")
+
+    # 這個服務最會「安靜地壞掉」的地方：文字正規化載不到時 CosyVoice 只印一行
+    # info 就繼續跑，數字/時間/百分比會原樣送進聲學模型，音訊聽起來也還「正常」，
+    # 所以很難發現。這裡把狀態講清楚。
+    _tn = getattr(getattr(cosyvoice, "frontend", None), "text_frontend", "")
+    if _tn:
+        print(f"[tts] text frontend = {_tn}", flush=True)
+    else:
+        print(
+            "[tts] WARNING: no text frontend — 數字/時間/百分比不會被正規化，"
+            "會被逐字念出",
+            flush=True,
+        )
+
     print("[tts] ready", flush=True)
 
 
