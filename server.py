@@ -64,7 +64,10 @@ VOICE_COALESCE_MAX_SEGMENTS = 6  # 安全上限：最多併這麼多段就強制
 # 見 docs/tts-prototype-notes.md。這裡連不上就優雅降級成純文字，不影響
 # 既有的 /ws/audio 文字回覆流程。
 TTS_ENABLED = True
-TTS_SERVICE_URL = "http://localhost:8001"
+# 用 127.0.0.1 而非 localhost：WSL 的 port relay 只聽 IPv4，localhost 會先試
+# ::1、等它 timeout 才 fallback，每次新連線平白多 ~2s（tts_client 每次呼叫
+# 都開新的 AsyncClient，所以每句話都付一次，而且已頂到 connect=2.0 的上限）。
+TTS_SERVICE_URL = "http://127.0.0.1:8001"
 
 SYSTEM_PROMPT = (
     "你是 imood，一個溫暖、有同理心的陪伴型虛擬人。"
